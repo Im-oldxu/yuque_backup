@@ -1,0 +1,71 @@
+/* 主题动态样式 */
+
+/* 字体大小 */
+html {
+  font-size: var(--font-size-base, 16px);
+}
+
+/* 减少动画 */
+.reduce-motion,
+.reduce-motion * {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+/* 布局变量 */
+:root {
+  --sidebar-width: 280px;
+  --sidebar-collapsed-width: 72px;
+  --header-height: 56px;
+  --tabbar-height: 40px;
+  --layout-spacing-xs: 0.25rem;
+  --layout-spacing-sm: 0.5rem;
+  --layout-spacing-md: 0.75rem;
+  --layout-spacing-lg: 1rem;
+  --layout-spacing-xl: 1.5rem;
+  --glass-opacity: 0.8;
+  --glass-blur: 12px;
+  --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.03);
+  --shadow-elevated: 0 4px 6px rgba(0, 0, 0, 0.04), 0 2px 4px rgba(0, 0, 0, 0.02);
+}
+
+/* 毛玻璃效果工具类 */
+.glass {
+  background-color: oklch(1 0 0 / 0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.dark .glass {
+  background-color: oklch(0.145 0 0 / 0.7);
+}
+
+.glass-light {
+  background-color: oklch(1 0 0 / 0.7);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.dark .glass-light {
+  background-color: oklch(0.205 0 0 / 0.6);
+}
+
+.glass-heavy {
+  background-color: oklch(1 0 0 / 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.dark .glass-heavy {
+  background-color: oklch(0.145 0 0 / 0.8);
+}
+
+/* 毛玻璃边框效果 */
+.glass-border {
+  border: 1px solid oklch(0 0 0 / 0.1);
+}
+
+.dark .glass-border {
+  border: 1px solid oklch(1 0 0 / 0.1);
+}

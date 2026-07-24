@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>离线预览</title>
+    <style>
+      body { margin: 0; padding: 32px; color: #202124; font: 15px/1.75 system-ui, sans-serif; background: #fff; }
+      article { max-width: 780px; margin: 0 auto; }
+      h1 { margin: 0 0 18px; font-size: 28px; line-height: 1.25; }
+      h2 { margin-top: 30px; font-size: 20px; }
+      pre { overflow: auto; padding: 16px; border: 1px solid #e5e7eb; border-radius: 6px; background: #f7f7f8; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { padding: 10px 12px; border: 1px solid #e5e7eb; text-align: left; }
+      .notice { margin: 20px 0; padding: 12px 14px; border-left: 3px solid #a66b08; background: #fff9eb; }
+    </style>
+  </head>
+  <body>
+    <article>
+      <h1 id="backup-and-restore">备份与恢复操作手册</h1>
+      <p>这是由 Mock 数据提供的安全离线预览。真实模式下，该 iframe 加载 API 文档定义的版本预览端点。</p>
+      <div class="notice">部分外部资源未能下载时，正文仍会保留，并在版本问题列表中明确显示原因。</div>
+      <h2 id="preflight-checks">恢复前检查</h2>
+      <table><thead><tr><th>检查项</th><th>要求</th></tr></thead><tbody><tr><td>版本完整性</td><td>完整或部分成功</td></tr><tr><td>资源状态</td><td>逐项核对未下载项</td></tr></tbody></table>
+      <h2 id="example-commands">示例命令</h2>
+      <pre><code>docker compose ps
+docker compose logs worker --since 30m</code></pre>
+    </article>
+  </body>
+</html>

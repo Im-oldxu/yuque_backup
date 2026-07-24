@@ -1,0 +1,1 @@
+"""Yuque-Backup backend application."""

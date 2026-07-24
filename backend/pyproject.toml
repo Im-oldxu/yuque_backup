@@ -1,0 +1,64 @@
+[project]
+name = "yuque-backup-backend"
+version = "1.0.0"
+description = "Yuque-Backup MVP backend"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "alembic>=1.18,<1.19",
+  "apscheduler==3.11.3",
+  "argon2-cffi>=25.1,<26",
+  "cryptography>=46,<47",
+  "fastapi>=0.139,<0.140",
+  "httpx>=0.28,<0.29",
+  "lxml>=6,<7",
+  "nh3>=0.3,<0.4",
+  "pydantic>=2.12,<3",
+  "pydantic-settings>=2.12,<3",
+  "sqlalchemy>=2.0.45,<2.1",
+  "uvicorn[standard]>=0.40,<0.52",
+]
+
+[dependency-groups]
+dev = [
+  "lxml-stubs>=0.5,<1",
+  "mypy>=1.19,<2",
+  "pytest>=9,<10",
+  "pytest-asyncio>=1.3,<2",
+  "pytest-cov>=7,<8",
+  "ruff>=0.14,<1",
+]
+
+[project.scripts]
+yuque-backup-api = "app.main:run"
+yuque-backup-migrate = "app.core.migrations:upgrade_database"
+yuque-backup-worker = "app.worker.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"alembic.ini" = "app/alembic.ini"
+"migrations" = "app/migrations"
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["B008"]
+
+[tool.mypy]
+python_version = "3.13"
+plugins = ["pydantic.mypy"]
+strict = true
+warn_unreachable = true

@@ -1,0 +1,12 @@
+.env
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tmp-migration/
+.venv/
+__pycache__/
+*.py[cod]
+coverage.xml
+data/
+dist/
