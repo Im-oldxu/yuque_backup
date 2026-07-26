@@ -96,11 +96,11 @@ jobs:
           }
           trap cleanup EXIT
           for attempt in {1..30}; do
-            "$binary" healthcheck api && break
+            "$binary" healthcheck api --url http://127.0.0.1:18081/health/ready && break
             kill -0 "$api_pid"
             sleep 1
           done
-          "$binary" healthcheck api
+          "$binary" healthcheck api --url http://127.0.0.1:18081/health/ready
           curl --fail --silent http://127.0.0.1:18081/ | grep --quiet '<div id="app"></div>'
           curl --fail --silent http://127.0.0.1:18081/api/v1/system/initialization | grep --quiet '"initialized":false'
           for attempt in {1..30}; do
