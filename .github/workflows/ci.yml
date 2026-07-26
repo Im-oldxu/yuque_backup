@@ -82,9 +82,22 @@ jobs:
           api_pid=$!
           "$binary" worker >"$RUNNER_TEMP/worker.log" 2>&1 &
           worker_pid=$!
-          trap 'kill "$api_pid" "$worker_pid" 2>/dev/null || true' EXIT
+          cleanup() {
+            status=$?
+            trap - EXIT
+            kill "$api_pid" "$worker_pid" 2>/dev/null || true
+            if (( status != 0 )); then
+              echo "--- api.log ---"
+              cat "$RUNNER_TEMP/api.log" 2>/dev/null || true
+              echo "--- worker.log ---"
+              cat "$RUNNER_TEMP/worker.log" 2>/dev/null || true
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
           for attempt in {1..30}; do
             "$binary" healthcheck api && break
+            kill -0 "$api_pid"
             sleep 1
           done
           "$binary" healthcheck api
@@ -92,6 +105,7 @@ jobs:
           curl --fail --silent http://127.0.0.1:18081/api/v1/system/initialization | grep --quiet '"initialized":false'
           for attempt in {1..30}; do
             "$binary" healthcheck worker && break
+            kill -0 "$worker_pid"
             sleep 1
           done
           "$binary" healthcheck worker
