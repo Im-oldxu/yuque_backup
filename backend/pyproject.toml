@@ -1,6 +1,6 @@
 [project]
 name = "yuque-backup-backend"
-version = "1.1.1"
+version = "1.2.0"
 description = "Yuque-Backup MVP backend"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -19,6 +19,9 @@ dependencies = [
 ]
 
 [dependency-groups]
+build = [
+  "pyinstaller==6.14.1",
+]
 dev = [
   "lxml-stubs>=0.5,<1",
   "mypy>=1.19,<2",
@@ -30,6 +33,7 @@ dev = [
 
 [project.scripts]
 yuque-backup-api = "app.main:run"
+yuque-backup = "app.cli:main"
 yuque-backup-migrate = "app.core.migrations:upgrade_database"
 yuque-backup-worker = "app.worker.main:run"
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -12,6 +13,7 @@ from app.core.database import engine, ping_database
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.migrations import database_is_at_head
+from app.web import mount_frontend
 
 
 @asynccontextmanager
@@ -26,12 +28,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-def create_app() -> FastAPI:
+def create_app(*, frontend_directory: Path | None = None) -> FastAPI:
     settings = get_settings()
     configure_logging()
     application = FastAPI(
         title="Yuque-Backup API",
-        version="1.1.1",
+        version="1.2.0",
         lifespan=lifespan,
         docs_url=None if settings.app_env == "production" else "/docs",
         redoc_url=None,
@@ -54,6 +56,7 @@ def create_app() -> FastAPI:
     from app.api.router import router
 
     application.include_router(router)
+    mount_frontend(application, frontend_directory)
     return application
 
 
@@ -62,4 +65,4 @@ app = create_app()
 
 def run() -> None:
     settings = get_settings()
-    uvicorn.run("app.main:app", host=settings.host, port=settings.port, workers=1)
+    uvicorn.run(app, host=settings.host, port=settings.port, workers=1)

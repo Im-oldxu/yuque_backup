@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      APP_MASTER_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      APP_ENV: development
+      SECURE_COOKIES: "false"
+      TRUSTED_ORIGINS: http://127.0.0.1:18081
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: 3.13.12
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.11.1
+
+      - name: Install locked toolchains
+        run: |
+          python -m pip install uv==0.10.0
+          corepack enable
+          corepack prepare pnpm@10.29.1 --activate
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --frozen --all-groups
+
+      - name: Check backend
+        working-directory: backend
+        run: |
+          uv lock --check
+          uv run --no-sync ruff check app tests ../scripts
+          uv run --no-sync mypy app
+          uv run --no-sync pytest -q
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Test and build frontend
+        working-directory: frontend
+        run: |
+          pnpm test
+          pnpm build:check
+
+      - name: Build unified executable
+        working-directory: backend
+        run: uv run --no-sync pyinstaller --clean --noconfirm yuque_backup.spec
+
+      - name: Smoke-test unified executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DATA_ROOT="$RUNNER_TEMP/yuque-backup"
+          export DATABASE_URL="sqlite:///$RUNNER_TEMP/yuque-backup/db/yuque-backup.sqlite3"
+          export HOST=127.0.0.1
+          export PORT=18081
+          binary=backend/dist/yuque-backup
+          "$binary" --version
+          "$binary" migrate
+          "$binary" api >"$RUNNER_TEMP/api.log" 2>&1 &
+          api_pid=$!
+          "$binary" worker >"$RUNNER_TEMP/worker.log" 2>&1 &
+          worker_pid=$!
+          trap 'kill "$api_pid" "$worker_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            "$binary" healthcheck api && break
+            sleep 1
+          done
+          "$binary" healthcheck api
+          curl --fail --silent http://127.0.0.1:18081/ | grep --quiet '<div id="app"></div>'
+          curl --fail --silent http://127.0.0.1:18081/api/v1/system/initialization | grep --quiet '"initialized":false'
+          for attempt in {1..30}; do
+            "$binary" healthcheck worker && break
+            sleep 1
+          done
+          "$binary" healthcheck worker
+
+      - name: Build container image
+        run: >-
+          docker build
+          --file deploy/Dockerfile
+          --tag yuque-backup:ci
+          --build-arg VERSION=ci
+          --build-arg REVISION=${{ github.sha }}
+          .
+
+      - name: Validate Compose configuration
+        env:
+          YUQUE_BACKUP_IMAGE: yuque-backup:ci
+          APP_PORT: "18082"
+          TRUSTED_ORIGINS: http://127.0.0.1:18082
+        run: docker compose --env-file deploy/.env.example --file deploy/docker-compose.yaml config --quiet
+
+      - name: Start Compose stack and verify container health
+        shell: bash
+        env:
+          YUQUE_BACKUP_IMAGE: yuque-backup:ci
+          APP_PORT: "18082"
+          TRUSTED_ORIGINS: http://127.0.0.1:18082
+        run: |
+          set -euo pipefail
+          compose=(docker compose --env-file deploy/.env.example --file deploy/docker-compose.yaml)
+          "${compose[@]}" up --wait --wait-timeout 180 --no-build
+
+          migrate_id=$("${compose[@]}" ps --all --quiet migrate)
+          api_id=$("${compose[@]}" ps --all --quiet api)
+          worker_id=$("${compose[@]}" ps --all --quiet worker)
+          test -n "$migrate_id"
+          test -n "$api_id"
+          test -n "$worker_id"
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$migrate_id")" = "0"
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$api_id")" = "healthy"
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$worker_id")" = "healthy"
+          curl --fail --silent http://127.0.0.1:18082/ | grep --quiet '<div id="app"></div>'
+          curl --fail --silent http://127.0.0.1:18082/health/ready | grep --quiet '"status":"ready"'
+
+      - name: Show Compose diagnostics on failure
+        if: failure()
+        env:
+          YUQUE_BACKUP_IMAGE: yuque-backup:ci
+          APP_PORT: "18082"
+          TRUSTED_ORIGINS: http://127.0.0.1:18082
+        run: |
+          docker compose --env-file deploy/.env.example --file deploy/docker-compose.yaml ps --all
+          docker compose --env-file deploy/.env.example --file deploy/docker-compose.yaml logs --no-color
+
+      - name: Stop Compose stack
+        if: always()
+        env:
+          YUQUE_BACKUP_IMAGE: yuque-backup:ci
+          APP_PORT: "18082"
+          TRUSTED_ORIGINS: http://127.0.0.1:18082
+        run: docker compose --env-file deploy/.env.example --file deploy/docker-compose.yaml down --volumes --remove-orphans

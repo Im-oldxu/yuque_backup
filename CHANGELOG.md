@@ -1,5 +1,29 @@
 # 更新日志
 
+## v1.2.0 - 2026-07-26
+
+### 更新
+
+- 增加包含 Vue 管理端、FastAPI、worker 和 Alembic 的统一可执行文件，提供 `api`、`worker`、`migrate`、`healthcheck` 和版本子命令。
+- 增加一体化 Dockerfile、Compose 和运行文档；同一镜像保持迁移、API 与 worker 进程隔离，并由 API 同源提供前端页面。
+- 增加 GitHub Actions CI 与 annotated Tag 发布流程，自动验证统一程序和 Compose，并发布 Linux `amd64`/`arm64` GHCR 镜像及 GitHub Release。
+
+### 优化
+
+- 容器改为非 root、只读根文件系统、移除 Linux capabilities，并使用独立数据库/内容命名卷和进程健康检查。
+- 简化生产反向代理拓扑，前端页面和 `/api/v1` 不再需要两个独立服务之间的代理配置。
+- 补充 Docker 首次运行、日志、备份、从 v1.1.1 bind mount 迁移、升级和回滚说明。
+
+### Bug 修复
+
+- 修复 Windows 本地构建会尝试修改正在使用的开发虚拟环境、导致统一可执行文件构建失败的问题；构建依赖现改为隔离安装。
+
+### 验证
+
+- 后端 Ruff、Mypy、`uv lock --check` 和 118 个 Pytest 测试通过；前端 61 个 Vitest 测试、类型检查和生产构建通过。
+- Windows 统一可执行文件已通过版本、迁移、嵌入式首页、初始化 API、API ready 和 worker 心跳冒烟验证。
+- OpenAPI 保持 47 条路径、53 个操作，数据库迁移 head 保持 `0001`。
+
 ## v1.1.1 - 2026-07-26
 
 ### 更新
