@@ -342,7 +342,9 @@ def _raw_body(document: dict[str, Any]) -> str:
     for key in ("body", "body_lake", "body_sheet", "body_table"):
         value = document.get(key)
         if isinstance(value, str):
-            return value
+            if value.strip():
+                return value
+            continue
         if value is not None:
             return json.dumps(value, ensure_ascii=False, sort_keys=True)
     return ""

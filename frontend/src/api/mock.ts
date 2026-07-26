@@ -1003,7 +1003,7 @@ export async function mockRequest<T>(path: string, options: RequestOptions = {})
       if (!version) fail(404, 'VERSION_NOT_FOUND', '版本不存在。')
       if (parts.length === 4 && method === 'GET') {
         requireQueryFields(url, [])
-        return clone({ ...version, document_id: document.id, downloads: { raw_response: true, raw_body: true, offline_html: true }, asset_summary: { total: version.resource_total, downloaded: version.resource_downloaded, failed: version.resource_total - version.resource_downloaded, skipped: 0 } }) as T
+        return clone({ ...version, document_id: document.id, downloads: { raw_response: true, raw_body: true, markdown: true, offline_html: true, pdf: true }, asset_summary: { total: version.resource_total, downloaded: version.resource_downloaded, failed: version.resource_total - version.resource_downloaded, skipped: 0 } }) as T
       }
       if (parts[4] === 'assets' && method === 'GET') {
         requireQueryFields(url, ['page', 'page_size', 'status', 'type'])

@@ -118,3 +118,12 @@ def test_invalid_sheet_keeps_raw_content_and_marks_partial_preview() -> None:
 
     assert "{not-json" in result.html
     assert "SHEET_PARSE_FAILED" in result.issues
+
+
+def test_preview_skips_blank_body_and_uses_lake_fallback() -> None:
+    result = build_document_preview(
+        {"type": "Doc", "body": " \n", "body_lake": "Readable lake fallback"}
+    )
+
+    assert "Readable lake fallback" in result.html
+    assert "PREVIEW_NOT_AVAILABLE" not in result.issues

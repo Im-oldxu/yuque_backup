@@ -53,11 +53,16 @@ ENV APP_ENV=production \
     SECURE_COOKIES=true
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes ca-certificates tzdata \
+    && apt-get install --no-install-recommends --yes \
+        ca-certificates \
+        fonts-noto-cjk \
+        libpango-1.0-0 \
+        libpangoft2-1.0-0 \
+        tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app \
-    && mkdir -p /data/db /data/content \
+    && mkdir -p /data/db /data/content /data/exports \
     && chown -R app:app /data
 
 COPY --from=binary-builder /src/backend/dist/yuque-backup /usr/local/bin/yuque-backup

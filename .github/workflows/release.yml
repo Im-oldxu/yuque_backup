@@ -6,20 +6,27 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
+
+env:
+  PROJECT_NAME: yuque-backup
+  PROJECT_DISPLAY_NAME: Yuque Backup
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  metadata:
+    name: Validate release tag
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      REGISTRY: ghcr.io
-      GH_TOKEN: ${{ github.token }}
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      image: ${{ steps.tag.outputs.image }}
+      image_tags: ${{ steps.tag.outputs.image_tags }}
 
     steps:
       - name: Checkout annotated tag
@@ -31,6 +38,8 @@ jobs:
       - name: Validate tag and prepare release metadata
         id: tag
         shell: bash
+        env:
+          REGISTRY: ghcr.io
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
@@ -38,22 +47,33 @@ jobs:
             echo "Unsupported release tag: $tag" >&2
             exit 1
           fi
+          version="${tag#v}"
           if [[ "$(git cat-file -t "refs/tags/$tag")" != "tag" ]]; then
             echo "Release tags must be annotated tags: $tag" >&2
             exit 1
           fi
-          git for-each-ref --format='%(contents)' "refs/tags/$tag" > "$RUNNER_TEMP/tag-body.md"
+          change_file="CHANGE/changelog_${tag}.md"
+          if [[ ! -f "$change_file" ]]; then
+            echo "Release changelog does not exist: $change_file" >&2
+            exit 1
+          fi
+          git cat-file tag "refs/tags/$tag" | sed '1,/^$/d' > "$RUNNER_TEMP/tag-body.md"
           if ! grep --quiet '[^[:space:]]' "$RUNNER_TEMP/tag-body.md"; then
             echo "Annotated tag body must not be empty" >&2
             exit 1
           fi
-          if ! grep --quiet --fixed-strings "Release $tag   " "$RUNNER_TEMP/tag-body.md" \
-            || ! grep --quiet '^## 1、新增功能：' "$RUNNER_TEMP/tag-body.md" \
-            || ! grep --quiet '^## 2、优化改进：' "$RUNNER_TEMP/tag-body.md" \
-            || ! grep --quiet '^## 3、Bug 修复：' "$RUNNER_TEMP/tag-body.md"; then
+          if ! cmp --silent "$change_file" "$RUNNER_TEMP/tag-body.md"; then
+            echo "Annotated tag body must exactly match $change_file" >&2
+            exit 1
+          fi
+          if [[ "$(head -n 1 "$RUNNER_TEMP/tag-body.md")" != "# Release $tag" ]] \
+            || ! grep --quiet '^## 新增功能$' "$RUNNER_TEMP/tag-body.md" \
+            || ! grep --quiet '^## 优化改进$' "$RUNNER_TEMP/tag-body.md" \
+            || ! grep --quiet '^## Bug 修复$' "$RUNNER_TEMP/tag-body.md"; then
             echo "Annotated tag body does not follow the required release-note structure" >&2
             exit 1
           fi
+
           repository_lower="${GITHUB_REPOSITORY,,}"
           image="$REGISTRY/$repository_lower"
           if [[ "$tag" == *-* ]]; then
@@ -63,19 +83,19 @@ jobs:
             prerelease=false
             image_tags="$image:$tag"$'\n'"$image:latest"
           fi
+
           {
             cat <<'INTRO'
           Yuque Backup 是面向单管理员、自托管场景的语雀只读备份系统，提供多凭据管理、定时增量备份、本地版本、附件保存、安全预览和任务审计。
-
-          ## Version Notes
-
           INTRO
             cat "$RUNNER_TEMP/tag-body.md"
             cat <<EOF
 
           ## Installation
 
-          使用仓库中的 Docker Compose 配置启动，镜像为 \`$image:$tag\`。完整步骤见 [Docker 快速运行项目](https://github.com/$GITHUB_REPOSITORY/blob/$tag/Docker%E5%BF%AB%E9%80%9F%E8%BF%90%E8%A1%8C%E9%A1%B9%E7%9B%AE.md)。
+          推荐使用仓库中的 Docker Compose 配置启动，镜像为 \`$image:$tag\`。完整步骤见 [Docker 快速运行项目](https://github.com/$GITHUB_REPOSITORY/blob/$tag/Docker%E5%BF%AB%E9%80%9F%E8%BF%90%E8%A1%8C%E9%A1%B9%E7%9B%AE.md)。
+
+          本 Release 同时提供 \`${PROJECT_NAME}_${version}_linux_amd64.tar.gz\`、\`${PROJECT_NAME}_${version}_linux_arm64.tar.gz\` 和 \`${PROJECT_NAME}_${version}_windows_amd64.zip\`。下载后使用 \`checksums.txt\` 校验全部二进制发布资产；原生运行仍需按 API、worker 和 migrate 子命令分别启动进程，并自行提供 WeasyPrint/Pango、字体等系统运行库。需要完整且一致的运行环境时应使用 Docker 镜像。
 
           ## Documentation
 
@@ -84,14 +104,245 @@ jobs:
           - [API 接口文档](https://github.com/$GITHUB_REPOSITORY/blob/$tag/API%20%E6%8E%A5%E5%8F%A3%E6%96%87%E6%A1%A3.md)
           EOF
           } > "$RUNNER_TEMP/release-notes.md"
+
           {
             echo "tag=$tag"
+            echo "version=$version"
             echo "prerelease=$prerelease"
             echo "image=$image"
             echo "image_tags<<EOF"
             echo "$image_tags"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Preserve release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-metadata
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
+          retention-days: 1
+
+  ci:
+    name: Require successful CI for tag
+    needs: metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Wait for CI on the same tag and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          ci_run_id=""
+          for attempt in {1..60}; do
+            ci_run_id=$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow ci.yml \
+              --commit "$GITHUB_SHA" \
+              --event push \
+              --limit 20 \
+              --json databaseId,headBranch \
+              --jq ".[] | select(.headBranch == \"$GITHUB_REF_NAME\") | .databaseId" \
+              | head -n 1)
+            if [[ -n "$ci_run_id" ]]; then
+              break
+            fi
+            sleep 5
+          done
+          if [[ -z "$ci_run_id" ]]; then
+            echo "CI run for tag $GITHUB_REF_NAME and commit $GITHUB_SHA was not found" >&2
+            exit 1
+          fi
+
+          for attempt in {1..300}; do
+            read -r status conclusion < <(
+              gh run view "$ci_run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json status,conclusion \
+                --jq '[.status, (.conclusion // "")] | @tsv'
+            )
+            if [[ "$status" == "completed" ]]; then
+              if [[ "$conclusion" != "success" ]]; then
+                echo "Required CI run $ci_run_id concluded with: $conclusion" >&2
+                exit 1
+              fi
+              echo "Required CI run $ci_run_id succeeded"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Timed out waiting for required CI run $ci_run_id" >&2
+          exit 1
+
+  frontend:
+    name: Build embedded frontend
+    needs:
+      - metadata
+      - ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.11.1
+
+      - name: Install locked frontend toolchain
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.29.1 --activate
+
+      - name: Build production frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Upload embedded frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-frontend
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  binaries:
+    name: Build ${{ matrix.platform }} binary
+    needs:
+      - metadata
+      - frontend
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux_amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux_arm64
+          - runner: windows-2025
+            platform: windows_amd64
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: 3.13.12
+
+      - name: Install locked backend build toolchain
+        run: python -m pip install uv==0.10.0
+
+      - name: Download embedded frontend
+        uses: actions/download-artifact@v5
+        with:
+          name: release-frontend
+          path: frontend/dist
+
+      - name: Build unified executable
+        working-directory: backend
+        run: uv run --isolated --frozen --group build pyinstaller --clean --noconfirm yuque_backup.spec
+
+      - name: Package Linux executable
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${PROJECT_NAME}_${RELEASE_VERSION}_${{ matrix.platform }}"
+          install -D -m 0755 backend/dist/yuque-backup "release/$archive/yuque-backup"
+          tar --directory release --create --gzip --file "release/$archive.tar.gz" "$archive"
+
+      - name: Package Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = '{0}_{1}_${{ matrix.platform }}' -f $env:PROJECT_NAME, $env:RELEASE_VERSION
+          New-Item -ItemType Directory -Path "release/$archive" -Force | Out-Null
+          Copy-Item -LiteralPath 'backend/dist/yuque-backup.exe' -Destination "release/$archive/yuque-backup.exe"
+          Compress-Archive -LiteralPath "release/$archive" -DestinationPath "release/$archive.zip"
+
+      - name: Upload binary archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.platform }}
+          path: |
+            release/*.tar.gz
+            release/*.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish image and release assets
+    needs:
+      - metadata
+      - binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      packages: write
+    env:
+      REGISTRY: ghcr.io
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+
+    steps:
+      - name: Checkout annotated tag
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download binary archives
+        uses: actions/download-artifact@v5
+        with:
+          pattern: binary-*
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+
+      - name: Download release notes
+        uses: actions/download-artifact@v5
+        with:
+          name: release-metadata
+          path: ${{ runner.temp }}/release-metadata
+
+      - name: Verify assets and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/release-assets"
+          assets=(
+            "${PROJECT_NAME}_${RELEASE_VERSION}_linux_amd64.tar.gz"
+            "${PROJECT_NAME}_${RELEASE_VERSION}_linux_arm64.tar.gz"
+            "${PROJECT_NAME}_${RELEASE_VERSION}_windows_amd64.zip"
+          )
+          for asset in "${assets[@]}"; do
+            test -s "$asset"
+          done
+          test "$(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 3
+          sha256sum "${assets[@]}" > checksums.txt
+          test "$(wc -l < checksums.txt)" -eq 3
+          sha256sum --check checksums.txt
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -113,26 +364,32 @@ jobs:
           file: deploy/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.tag.outputs.image_tags }}
+          tags: ${{ needs.metadata.outputs.image_tags }}
           build-args: |
-            VERSION=${{ steps.tag.outputs.tag }}
+            VERSION=${{ needs.metadata.outputs.tag }}
             REVISION=${{ github.sha }}
             SOURCE=https://github.com/${{ github.repository }}
 
-      - name: Create GitHub prerelease
-        if: steps.tag.outputs.prerelease == 'true'
-        run: >-
-          gh release create "${{ steps.tag.outputs.tag }}"
-          --verify-tag
-          --title "${{ steps.tag.outputs.tag }}"
-          --notes-file "$RUNNER_TEMP/release-notes.md"
-          --prerelease
+      - name: Create GitHub prerelease with assets
+        if: needs.metadata.outputs.prerelease == 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" "$RUNNER_TEMP"/release-assets/* \
+            --verify-tag \
+            --title "$PROJECT_DISPLAY_NAME $RELEASE_VERSION" \
+            --notes-file "$RUNNER_TEMP/release-metadata/release-notes.md" \
+            --prerelease
 
-      - name: Create GitHub release and update latest
-        if: steps.tag.outputs.prerelease == 'false'
-        run: >-
-          gh release create "${{ steps.tag.outputs.tag }}"
-          --verify-tag
-          --title "${{ steps.tag.outputs.tag }}"
-          --notes-file "$RUNNER_TEMP/release-notes.md"
-          --latest
+      - name: Create GitHub release with assets and update latest
+        if: needs.metadata.outputs.prerelease == 'false'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" "$RUNNER_TEMP"/release-assets/* \
+            --verify-tag \
+            --title "$PROJECT_DISPLAY_NAME $RELEASE_VERSION" \
+            --notes-file "$RUNNER_TEMP/release-metadata/release-notes.md" \
+            --latest

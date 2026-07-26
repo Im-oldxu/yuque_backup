@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
 from app.core.models import BackupJob
+from app.modules.exports import ExportService
 from app.modules.retention import RetentionService
 from app.storage import AssetDownloader, ContentStore
 from app.worker.coordinator import JobCoordinator
@@ -91,6 +92,7 @@ class WorkerService:
             now=self._now,
         )
         self.retention = RetentionService(session_factory, self.store, now=self._now)
+        self.exports = ExportService(session_factory, settings, self.store, now=self._now)
         self._session_factory = session_factory
 
     async def run_once(self) -> bool:
@@ -123,7 +125,7 @@ class WorkerService:
         if item.job_id:
             status = self.coordinator.aggregate_job(item.job_id)
             if status in {"succeeded", "partial", "failed"}:
-                self.retention.run(cleanup_job_id=item.job_id)
+                self._handle_terminal_job(item.job_id, status)
         return True
 
     async def run_until_idle(self, *, max_items: int = 10_000) -> int:
@@ -146,4 +148,11 @@ class WorkerService:
                 )
             )
         for job_id in job_ids:
-            self.coordinator.aggregate_job(job_id)
+            status = self.coordinator.aggregate_job(job_id)
+            if status in {"succeeded", "partial", "failed"}:
+                self._handle_terminal_job(job_id, status)
+
+    def _handle_terminal_job(self, job_id: str, status: str) -> None:
+        if status in {"succeeded", "partial"}:
+            self.exports.export_job(job_id)
+        self.retention.run(cleanup_job_id=job_id)

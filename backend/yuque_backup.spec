@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
 backend_root = Path(SPECPATH)
 repository_root = backend_root.parent
 frontend_dist = repository_root / "frontend" / "dist"
@@ -15,6 +17,7 @@ a = Analysis(
         (str(backend_root / "alembic.ini"), "app"),
         (str(backend_root / "migrations"), "app/migrations"),
         (str(frontend_dist), "app/static"),
+        *collect_data_files("weasyprint"),
     ],
     hiddenimports=[
         "uvicorn.logging",
@@ -22,6 +25,7 @@ a = Analysis(
         "uvicorn.protocols.http.auto",
         "uvicorn.protocols.websockets.auto",
         "uvicorn.lifespan.on",
+        *collect_submodules("weasyprint"),
     ],
     hookspath=[],
     hooksconfig={},

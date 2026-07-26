@@ -1,7 +1,7 @@
 # Yuque-Backup MVP API 接口文档
 
-> 文档状态：已确认并完成实现，作为 v1.2.0 前后端契约\
-> 版本：v1.2.0\
+> 文档状态：已确认并完成实现，作为 v1.3.0 前后端契约\
+> 版本：v1.3.0\
 > 编写及官方文档核验日期：2026-07-23  
 > 实现与契约验收日期：2026-07-26\
 > 输入依据：[需求文档.md](需求文档.md)、[技术方案文档.md](技术方案文档.md)  
@@ -11,7 +11,7 @@
 
 本文只定义 MVP 所需的本地 Web API。语雀 OpenAPI 是 worker 的内部集成，不由前端直接调用，也不在本文重复定义。
 
-v1.2.0 后端 OpenAPI 共包含 47 条路径、53 个操作；前端真实 API 模式已经完成初始化、登录、会话、CSRF、仪表盘和 worker 心跳的浏览器联调。接口路径、字段和错误结构仍以本文契约为准。
+v1.3.0 后端 OpenAPI 共包含 50 条路径、56 个操作；新增标准化 Markdown 读取、Markdown 下载和按需 PDF 下载。前端文章页以经过清理的 Markdown 为主阅读视图，并保留版本、资源、问题和鉴权下载能力。接口路径、字段和错误结构仍以本文契约为准。
 
 MVP API 覆盖：
 
@@ -711,7 +711,9 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
   "downloads": {
     "raw_response": true,
     "raw_body": true,
-    "offline_html": true
+    "markdown": true,
+    "offline_html": true,
+    "pdf": true
   },
   "asset_summary": {
     "total": 3,
@@ -764,7 +766,17 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 
 原始 Markdown 中的图片链接保持不变；安全预览不下载或加载这些远程图片。该 HTML 只能引用本系统受控资源地址，不主动加载远程 URL。
 
-### 9.9 下载原始 API 响应
+### 9.9 读取标准化 Markdown
+
+`GET /api/v1/documents/{document_id}/versions/{version_id}/markdown`
+
+- 权限：管理员会话；供文章阅读器读取，不作为匿名静态文件暴露；
+- 成功：`200 text/markdown; charset=utf-8`；
+- Header：`Cache-Control: private, no-store`、`X-Content-Type-Options: nosniff`；
+- 对旧版本尚未回填 `export.md` 时，可从数据库中的标准化元数据生成等价 Markdown；
+- 错误：`404 VERSION_NOT_FOUND`、`410 VERSION_CONTENT_PURGED`。
+
+### 9.10 下载原始 API 响应
 
 `GET /api/v1/documents/{document_id}/versions/{version_id}/downloads/raw-response`
 
@@ -772,7 +784,7 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 - 成功：`200 application/json`，`Content-Disposition: attachment`；
 - 错误：`404 VERSION_NOT_FOUND`、`410 VERSION_CONTENT_PURGED`。
 
-### 9.10 下载原始正文
+### 9.11 下载原始正文
 
 `GET /api/v1/documents/{document_id}/versions/{version_id}/downloads/raw-body`
 
@@ -780,7 +792,25 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 - 成功：`200` 流式响应，文件扩展名和 MIME 按保存格式确定；
 - 错误：`404 VERSION_NOT_FOUND`、`410 VERSION_CONTENT_PURGED`。
 
-### 9.11 下载离线 HTML
+### 9.12 下载标准化 Markdown
+
+`GET /api/v1/documents/{document_id}/versions/{version_id}/downloads/markdown`
+
+- 权限：管理员会话；
+- 成功：`200 text/markdown; charset=utf-8`，`Content-Disposition: attachment` 使用清理后的文章标题和 `.md` 扩展名；
+- 错误：`404 VERSION_NOT_FOUND`、`410 VERSION_CONTENT_PURGED`。
+
+### 9.13 下载 PDF
+
+`GET /api/v1/documents/{document_id}/versions/{version_id}/downloads/pdf`
+
+- 权限：管理员会话；
+- 行为：从标准化 Markdown 按需生成 PDF，不在内容目录或导出目录持久化 PDF；
+- 成功：`200 application/pdf`，`Content-Disposition: attachment` 使用清理后的文章标题和 `.pdf` 扩展名；
+- Docker 镜像包含 WeasyPrint/Pango 和中文字体；原生部署必须自行提供相应运行库；
+- 错误：`404 VERSION_NOT_FOUND`、`410 VERSION_CONTENT_PURGED`、`503 PDF_EXPORT_UNAVAILABLE`。
+
+### 9.14 下载离线 HTML
 
 `GET /api/v1/documents/{document_id}/versions/{version_id}/downloads/offline-html`
 
@@ -789,7 +819,7 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 - HTML 中资源路径已本地化，但单独脱离服务器打开时不承诺附件内嵌；
 - 错误：`404 VERSION_NOT_FOUND`、`409 PREVIEW_NOT_AVAILABLE`、`410 VERSION_CONTENT_PURGED`。
 
-### 9.12 内联读取资源
+### 9.15 内联读取资源
 
 `GET /api/v1/assets/{asset_id}/content`
 
@@ -798,7 +828,7 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 - 非安全内联类型强制 `Content-Disposition: attachment`；
 - 错误：`404 ASSET_NOT_FOUND`、`410 ASSET_CONTENT_PURGED`。
 
-### 9.13 下载单个资源
+### 9.16 下载单个资源
 
 `GET /api/v1/assets/{asset_id}/download`
 
@@ -1205,7 +1235,7 @@ MVP 不存在第二种本地角色，不在响应中返回权限数组，也不�
 | `422` | 请求字段、Cron、时区或 URL 校验失败 |
 | `429` | 本地登录限速；语雀 429 不直接作为前端请求响应 |
 | `500` | 未预期服务端错误 |
-| `503` | 数据库、迁移或内容存储不可用 |
+| `503` | 数据库、迁移、内容存储或 PDF 导出运行库不可用 |
 
 ### 15.2 通用错误码
 
@@ -1241,6 +1271,7 @@ MVP 不存在第二种本地角色，不在响应中返回权限数组，也不�
 | `VERSION_NOT_FOUND` | 404 |
 | `PREVIEW_NOT_AVAILABLE` | 409 |
 | `VERSION_CONTENT_PURGED` | 410 |
+| `PDF_EXPORT_UNAVAILABLE` | 503 |
 | `ASSET_NOT_FOUND` | 404 |
 | `ASSET_CONTENT_PURGED` | 410 |
 | `JOB_NOT_FOUND` | 404 |
@@ -1292,7 +1323,9 @@ MVP 不存在第二种本地角色，不在响应中返回权限数组，也不�
 
 ### 16.5 离线浏览
 
-本地浏览、搜索、版本、预览和下载接口只依赖 API、SQLite 和内容目录。语雀不可访问时，这些 GET 接口仍必须正常工作；只有验证、发现和备份任务会受到语雀连接状态影响。
+本地浏览、搜索、版本、Markdown 阅读和下载接口只依赖 API、SQLite 和内容目录；PDF 额外依赖部署环境中的本地渲染运行库。语雀不可访问时，这些 GET 接口仍必须正常工作；只有验证、发现和备份任务会受到语雀连接状态影响。
+
+文章页先读取版本详情中的 `downloads`，再调用版本 Markdown 端点渲染正文；`markdown=false` 或版本已清理时不发起读取。Markdown 解析后必须执行 DOM 清理，语法高亮只能使用随前端构建发布的本地资源。Markdown 和 PDF 下载分别使用独立鉴权 URL，不能把后端文件路径交给浏览器。
 
 ## 17. OpenAPI 与实现要求
 

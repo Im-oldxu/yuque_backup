@@ -21,13 +21,17 @@ import {
   Search,
   X,
 } from 'lucide-vue-next'
-import type { Repository, SearchResults, TocTree } from '@/api'
+import type { DocumentSummary, Repository, SearchResults, TocTree } from '@/api'
 import type { PreviewHeading } from '@/utils/preview-outline'
+import ArticleOutline from './ArticleOutline.vue'
+import DocumentBackupStatus from './DocumentBackupStatus.vue'
 import TocTreeNode from './TocTreeNode.vue'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   activeDocumentId: string
+  activeHeadingId?: string
   activeRepositoryId: string
+  documentStatuses?: Record<string, DocumentSummary | undefined>
   outline: PreviewHeading[]
   outlineError?: string
   outlineLoading?: boolean
@@ -37,12 +41,19 @@ const props = defineProps<{
   repositoryTocErrors: Record<string, string | undefined>
   repositoryTocLoadingIds: string[]
   repositoryTocs: Record<string, TocTree | undefined>
+  repositoryDocumentErrors?: Record<string, string | undefined>
   searchError?: string
   searchLoading?: boolean
   searchQuery: string
   searchResults: SearchResults | null
   searchTerm: string
-}>()
+  showOutlineTab?: boolean
+}>(), {
+  activeHeadingId: '',
+  documentStatuses: () => ({}),
+  repositoryDocumentErrors: () => ({}),
+  showOutlineTab: true,
+})
 
 const emit = defineEmits<{
   clearSearch: []
@@ -114,6 +125,10 @@ watch(() => props.activeRepositoryId, (repositoryId) => {
   openRepositoryIds.value = new Set([...openRepositoryIds.value, repositoryId])
   emit('requestToc', repositoryId)
 })
+
+watch(() => props.showOutlineTab, (showOutlineTab) => {
+  if (!showOutlineTab && activeTab.value === 'outline') activeTab.value = 'repository'
+})
 </script>
 
 <template>
@@ -125,9 +140,9 @@ watch(() => props.activeRepositoryId, (repositoryId) => {
 
     <Tabs v-model="activeTab" class="flex min-h-0 flex-1 flex-col">
       <div class="border-b p-2">
-        <TabsList class="grid w-full grid-cols-2" aria-label="阅读导航">
+        <TabsList class="grid w-full" :class="showOutlineTab ? 'grid-cols-2' : 'grid-cols-1'" aria-label="阅读导航">
           <TabsTrigger value="repository"><BookOpen />知识库目录</TabsTrigger>
-          <TabsTrigger value="outline"><ListTree />文章大纲</TabsTrigger>
+          <TabsTrigger v-if="showOutlineTab" value="outline"><ListTree />文章大纲</TabsTrigger>
         </TabsList>
       </div>
 
@@ -184,6 +199,10 @@ watch(() => props.activeRepositoryId, (repositoryId) => {
                 >
                   <FileText class="size-4 shrink-0 text-muted-foreground" />
                   <span class="min-w-0 flex-1 truncate">{{ documentResult.title }}</span>
+                  <DocumentBackupStatus
+                    :latest-version-id="documentResult.latest_version_id"
+                    :completeness="documentResult.latest_version_completeness"
+                  />
                 </RouterLink>
               </div>
             </section>
@@ -195,6 +214,11 @@ watch(() => props.activeRepositoryId, (repositoryId) => {
         </template>
 
         <template v-else>
+          <div class="mb-2 flex flex-wrap gap-x-3 gap-y-1 border-b px-2 pb-2 text-xs text-muted-foreground" aria-label="备份状态说明">
+            <DocumentBackupStatus latest-version-id="version" completeness="complete" show-label />
+            <DocumentBackupStatus latest-version-id="version" completeness="partial" show-label />
+            <DocumentBackupStatus show-label />
+          </div>
           <div v-if="repositoriesLoading" class="flex items-center justify-center gap-2 px-3 py-8 text-sm text-muted-foreground">
             <Spinner />正在读取知识库
           </div>
@@ -226,15 +250,19 @@ watch(() => props.activeRepositoryId, (repositoryId) => {
                   <p class="text-xs text-destructive">{{ repositoryTocErrors[repository.id] }}</p>
                   <Button variant="ghost" size="sm" class="mt-1" @click="emit('requestToc', repository.id, true)"><RefreshCw data-icon="inline-start" />重试</Button>
                 </div>
-                <ul v-else-if="repositoryTocs[repository.id]?.items.length" class="flex flex-col gap-0.5 py-0.5">
-                  <TocTreeNode
-                    v-for="node in repositoryTocs[repository.id]?.items ?? []"
-                    :key="node.id"
-                    :node="node"
-                    :active-document-id="activeDocumentId"
-                  />
-                </ul>
-                <p v-else class="px-2 py-3 text-xs text-muted-foreground">暂无目录内容</p>
+                <template v-else>
+                  <p v-if="repositoryDocumentErrors[repository.id]" class="px-2 py-2 text-xs text-destructive">目录已显示，但备份状态读取失败：{{ repositoryDocumentErrors[repository.id] }}</p>
+                  <ul v-if="repositoryTocs[repository.id]?.items.length" class="flex flex-col gap-0.5 py-0.5">
+                    <TocTreeNode
+                      v-for="node in repositoryTocs[repository.id]?.items ?? []"
+                      :key="node.id"
+                      :node="node"
+                      :active-document-id="activeDocumentId"
+                      :document-statuses="documentStatuses"
+                    />
+                  </ul>
+                  <p v-else class="px-2 py-3 text-xs text-muted-foreground">暂无目录内容</p>
+                </template>
               </div>
             </li>
           </ul>
@@ -242,23 +270,15 @@ watch(() => props.activeRepositoryId, (repositoryId) => {
         </template>
       </TabsContent>
 
-      <TabsContent value="outline" class="mt-0 min-h-0 flex-1 overflow-y-auto p-2">
-        <div v-if="outlineLoading" class="flex items-center justify-center gap-2 px-3 py-8 text-sm text-muted-foreground"><Spinner />正在读取文章大纲</div>
-        <div v-else-if="outlineError" class="px-3 py-8 text-center"><p class="text-sm text-destructive">{{ outlineError }}</p><Button variant="outline" size="sm" class="mt-3" @click="emit('retryOutline')"><RefreshCw data-icon="inline-start" />重试</Button></div>
-        <nav v-else-if="outline.length" aria-label="文章大纲" class="flex flex-col gap-0.5">
-          <button
-            v-for="heading in outline"
-            :key="`${heading.id}-${heading.level}`"
-            type="button"
-            class="min-h-8 w-full truncate rounded-md py-1.5 pr-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            :class="heading.level === 1 ? 'font-medium text-foreground' : ''"
-            :style="{ paddingLeft: `${8 + Math.max(0, heading.level - 1) * 12}px` }"
-            @click="emit('selectHeading', heading)"
-          >
-            {{ heading.text }}
-          </button>
-        </nav>
-        <p v-else class="px-3 py-8 text-center text-sm text-muted-foreground">此版本没有可识别的标题</p>
+      <TabsContent v-if="showOutlineTab" value="outline" class="mt-0 min-h-0 flex-1 overflow-y-auto p-2">
+        <ArticleOutline
+          :active-heading-id="activeHeadingId"
+          :error="outlineError"
+          :headings="outline"
+          :loading="outlineLoading"
+          @retry="emit('retryOutline')"
+          @select="emit('selectHeading', $event)"
+        />
       </TabsContent>
     </Tabs>
   </div>

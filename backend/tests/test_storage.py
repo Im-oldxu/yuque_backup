@@ -26,6 +26,7 @@ def test_version_bundle_is_committed_atomically(tmp_path: Path) -> None:
         raw_response={"data": {"body": "world"}},
         raw_body="world",
         body_format="markdown",
+        markdown="# Hello\n\nworld\n",
         preview_html="<p>world</p>",
         normalized_metadata={"title": "Hello"},
         resources=[],
@@ -33,8 +34,10 @@ def test_version_bundle_is_committed_atomically(tmp_path: Path) -> None:
 
     assert store.resolve(committed.raw_response_path).is_file()
     assert store.resolve(committed.raw_body_path).read_text(encoding="utf-8") == "world"
+    assert store.resolve(committed.markdown_path).read_text(encoding="utf-8") == "# Hello\n\nworld\n"
     manifest = json.loads(store.resolve(committed.manifest_path).read_text(encoding="utf-8"))
     assert manifest["content_hash"] == digest
+    assert "export.md" in {item["name"] for item in manifest["files"]}
     assert committed.content_size_bytes > 0
     assert not list((tmp_path / "content" / ".tmp" / "job-1").iterdir())
 

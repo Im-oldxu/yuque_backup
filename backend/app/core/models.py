@@ -311,6 +311,7 @@ class DocumentVersion(Base):
     completeness: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     raw_response_path: Mapped[str | None] = mapped_column(String(2048))
     raw_body_path: Mapped[str | None] = mapped_column(String(2048))
+    markdown_path: Mapped[str | None] = mapped_column(String(2048))
     preview_path: Mapped[str | None] = mapped_column(String(2048))
     manifest_path: Mapped[str | None] = mapped_column(String(2048))
     content_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)

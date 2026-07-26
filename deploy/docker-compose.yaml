@@ -59,6 +59,7 @@ services:
     volumes:
       - database:/data/db
       - content:/data/content
+      - exports:/data/exports
     healthcheck:
       test: ["CMD", "yuque-backup", "healthcheck", "worker"]
       interval: 30s
@@ -72,3 +73,5 @@ volumes:
     name: yuque-backup-database
   content:
     name: yuque-backup-content
+  exports:
+    name: yuque-backup-exports

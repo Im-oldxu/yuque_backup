@@ -2,7 +2,7 @@
 
 本文对应仓库中的 `deploy/Dockerfile`、`deploy/docker-compose.yaml` 和 `deploy/.env.example`。最终镜像只包含一个 `yuque-backup` 统一可执行文件；Compose 使用它的 `migrate`、`api` 和 `worker` 子命令。前端页面与 `/api/v1` 由同一个 API 容器同源提供。
 
-项目使用 SQLite 持久化业务数据和任务队列，使用内容目录保存正文与附件。实际代码不依赖 PostgreSQL、Redis、Celery 或外部对象存储，因此 Compose 不包含这些服务。
+项目使用 SQLite 持久化业务数据和任务队列，使用内容目录保存正文、标准化 Markdown 与附件，并使用导出目录保存可读 Markdown 树、任务快照和清单。PDF 由鉴权 API 按需生成，不持久化到导出卷。实际代码不依赖 PostgreSQL、Redis、Celery 或外部对象存储，因此 Compose 不包含这些服务。
 
 ## 1. 运行要求
 
@@ -11,6 +11,23 @@
 - Linux `amd64` 或 `arm64`，或者支持 Linux 容器的 Docker Desktop；
 - 本地至少预留镜像、数据库和备份内容所需空间；
 - 从公网使用时应有 HTTPS 反向代理。
+
+### Release 二进制归档
+
+每个 GitHub Release 除 Docker 镜像外，还提供以下由对应平台原生 runner 实际构建的统一可执行文件归档：
+
+- `yuque-backup_<version>_linux_amd64.tar.gz`；
+- `yuque-backup_<version>_linux_arm64.tar.gz`；
+- `yuque-backup_<version>_windows_amd64.zip`；
+- `checksums.txt`，包含上述三个归档的 SHA256。
+
+归档名中的 `<version>` 不包含 Tag 的 `v` 前缀，例如 `v1.3.0` 对应 `yuque-backup_1.3.0_linux_amd64.tar.gz`。Release 标题使用项目显示名称和同一个无 `v` 版本号，例如 `Yuque Backup 1.3.0`。
+
+Tag push 会同时触发普通 CI 和 Release Workflow；Release 会等待同一 Tag、同一提交的普通 CI 成功后才构建并发布这些产物，不会在 Release 阶段重复运行业务测试。
+
+Linux 可下载全部归档和 `checksums.txt` 后执行 `sha256sum --check checksums.txt`；PowerShell 可使用 `Get-FileHash -Algorithm SHA256 <归档>` 与 `checksums.txt` 对照。二进制归档适用于自定义原生部署，但不会替代操作系统运行库：PDF 导出仍需要 WeasyPrint/Pango、中文字体等依赖。Docker 镜像已经按 `deploy/Dockerfile` 固定这些依赖，是推荐的生产部署方式。
+
+原生部署必须继续使用同一个二进制的 `migrate`、`api` 和 `worker` 子命令分别运行迁移、API 和唯一 worker；从旧版升级后可执行一次 `export` 回填历史 Markdown。部署者需自行提供进程守护、权限、SQLite 本地磁盘目录、内容/导出目录和健康检查，不能只启动 API 进程。
 
 所有命令默认在仓库根目录执行。先创建部署环境文件：
 
@@ -69,7 +86,7 @@ TRUSTED_ORIGINS=http://127.0.0.1:8877,http://localhost:8877
 公网生产示例：
 
 ```dotenv
-YUQUE_BACKUP_IMAGE=ghcr.io/im-oldxu/yuque_backup:v1.2.0
+YUQUE_BACKUP_IMAGE=ghcr.io/im-oldxu/yuque_backup:v1.3.0
 APP_ENV=production
 SECURE_COOKIES=true
 TRUSTED_ORIGINS=https://backup.example.com
@@ -144,21 +161,22 @@ docker compose --env-file deploy/.env -f deploy/docker-compose.yaml down
 docker compose --env-file deploy/.env -f deploy/docker-compose.yaml restart api worker
 ```
 
-不要使用 `docker compose down -v`，它会删除数据库和内容命名卷。不要手工删除 SQLite、`alembic_version` 或内容目录来处理启动失败。
+不要使用 `docker compose down -v`，它会删除数据库、内容和导出命名卷。不要手工删除 SQLite、`alembic_version` 或内容目录来处理启动失败。
 
 ## 7. 数据持久化和备份
 
-Compose 创建两个具有固定名称的卷：
+Compose 创建三个具有固定名称的卷：
 
 | 卷 | 容器路径 | 内容 | 访问方式 |
 | --- | --- | --- | --- |
 | `yuque-backup-database` | `/data/db` | SQLite、WAL 和迁移版本 | migrate/API/worker 读写 |
 | `yuque-backup-content` | `/data/content` | 原始响应、正文、离线 HTML、附件和临时提交区 | API 只读、worker 读写 |
+| `yuque-backup-exports` | `/data/exports` | 可读 Markdown `latest` 树、任务快照与清单 | worker 读写 |
 
 列出并检查卷：
 
 ```bash
-docker volume inspect yuque-backup-database yuque-backup-content
+docker volume inspect yuque-backup-database yuque-backup-content yuque-backup-exports
 ```
 
 一致性备份应先停止 API 和 worker，防止 SQLite WAL 与内容提交在归档期间变化：
@@ -168,19 +186,20 @@ mkdir -p backup
 docker compose --env-file deploy/.env -f deploy/docker-compose.yaml stop api worker
 docker run --rm -v yuque-backup-database:/source:ro -v "$PWD/backup:/backup" alpine:3.22 tar -C /source -czf /backup/database.tgz .
 docker run --rm -v yuque-backup-content:/source:ro -v "$PWD/backup:/backup" alpine:3.22 tar -C /source -czf /backup/content.tgz .
+docker run --rm -v yuque-backup-exports:/source:ro -v "$PWD/backup:/backup" alpine:3.22 tar -C /source -czf /backup/exports.tgz .
 docker compose --env-file deploy/.env -f deploy/docker-compose.yaml start api worker
 ```
 
-同时备份 `deploy/.env` 中的 `APP_MASTER_KEY`，但不要把它与公开归档放在一起。恢复前必须停止并移除应用容器，清空目标卷后分别解压数据库与内容归档，再用归档对应的镜像版本启动。恢复会覆盖当前数据，操作前应再做一份当前卷快照。
+同时备份 `deploy/.env` 中的 `APP_MASTER_KEY`，但不要把它与公开归档放在一起。恢复前必须停止并移除应用容器，清空目标卷后分别解压数据库、内容与导出归档，再用归档对应的镜像版本启动。恢复会覆盖当前数据，操作前应再做一份当前卷快照。
 
 SQLite 数据库必须位于宿主机本地文件系统，不能放在 NFS、SMB 或 NAS 上。内容卷可以绑定到已由宿主机挂载的 NAS，但必须验证原子重命名、长文件名、断线和剩余空间行为。绑定宿主机目录时，先创建目录并授权容器用户 `10001:10001`：
 
 ```bash
-sudo mkdir -p /srv/yuque-backup/db /mnt/nas/yuque-backup/content
-sudo chown -R 10001:10001 /srv/yuque-backup/db /mnt/nas/yuque-backup/content
+sudo mkdir -p /srv/yuque-backup/db /mnt/nas/yuque-backup/content /mnt/nas/yuque-backup/exports
+sudo chown -R 10001:10001 /srv/yuque-backup/db /mnt/nas/yuque-backup/content /mnt/nas/yuque-backup/exports
 ```
 
-可在自建的 Compose override 中把 `database` 绑定到 `/srv/yuque-backup/db`，把 `content` 绑定到 `/mnt/nas/yuque-backup/content`。数据库路径仍必须是本地磁盘。
+可在自建的 Compose override 中把 `database` 绑定到 `/srv/yuque-backup/db`，把 `content` 和 `exports` 分别绑定到 `/mnt/nas/yuque-backup/content` 与 `/mnt/nas/yuque-backup/exports`。数据库路径仍必须是本地磁盘。
 
 ## 8. 从 v1.1.1 后端 Compose 迁移
 
@@ -208,7 +227,7 @@ docker run --rm --mount type=bind,src="$PWD/data/content",dst=/source,readonly -
 发布工作流会为稳定 annotated Tag 发布 `vX.Y.Z` 和 `latest` 镜像；预发布 Tag 只发布自己的版本标签，不覆盖 `latest`。生产环境建议显式固定版本。
 
 1. 阅读 GitHub Release 的版本说明。
-2. 按上一节备份两个卷和主密钥。
+2. 按第 7 节备份三个卷和主密钥。
 3. 将 `deploy/.env` 的 `YUQUE_BACKUP_IMAGE` 改为目标 `vX.Y.Z`。
 4. 拉取并重建容器：
 
@@ -226,7 +245,7 @@ docker compose --env-file deploy/.env -f deploy/docker-compose.yaml ps -a
 
 1. 停止服务：`docker compose --env-file deploy/.env -f deploy/docker-compose.yaml down`。
 2. 保存当前失败现场的数据库、内容卷和日志。
-3. 恢复升级前的 `database.tgz` 与 `content.tgz`，以及对应的 `APP_MASTER_KEY`。
+3. 恢复升级前的 `database.tgz`、`content.tgz` 与 `exports.tgz`，以及对应的 `APP_MASTER_KEY`。
 4. 把 `YUQUE_BACKUP_IMAGE` 改回升级前的不可变 `vX.Y.Z`。
 5. 执行 `pull`、`up -d`，检查迁移容器、API/worker 健康和日志。
 

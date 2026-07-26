@@ -155,6 +155,7 @@ async def serve(settings: Settings | None = None) -> None:
     if not database_is_at_head(engine):
         raise RuntimeError("database schema is not at the Alembic head; run migrations before startup")
     service = WorkerService(SessionLocal, settings)
+    service.exports.prepare(create_initial_snapshot=True)
     service.queue.recover_expired()
     service.coordinator.apply_cancellations()
     service.coordinator.promote_pending_job()

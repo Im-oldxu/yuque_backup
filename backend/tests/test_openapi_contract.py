@@ -130,6 +130,31 @@ EXPECTED_RESPONSES: dict[OperationKey, set[int]] = {
         500,
         503,
     },
+    ("GET", "/api/v1/documents/{document_id}/versions/{version_id}/markdown"): {
+        200,
+        401,
+        404,
+        410,
+        422,
+        500,
+    },
+    ("GET", "/api/v1/documents/{document_id}/versions/{version_id}/downloads/markdown"): {
+        200,
+        401,
+        404,
+        410,
+        422,
+        500,
+    },
+    ("GET", "/api/v1/documents/{document_id}/versions/{version_id}/downloads/pdf"): {
+        200,
+        401,
+        404,
+        410,
+        422,
+        500,
+        503,
+    },
     ("GET", "/api/v1/documents/{document_id}/versions/{version_id}/downloads/offline-html"): {
         200,
         206,
@@ -407,3 +432,19 @@ def test_openapi_file_response_media_types_and_headers() -> None:
     for key in expected_media_types:
         if "/downloads/" in key[1] or key[1].endswith("/download"):
             assert "Content-Disposition" in operations[key]["responses"]["200"]["headers"]
+
+    generated_downloads = {
+        ("GET", "/api/v1/documents/{document_id}/versions/{version_id}/markdown"): "text/markdown",
+        (
+            "GET",
+            "/api/v1/documents/{document_id}/versions/{version_id}/downloads/markdown",
+        ): "text/markdown",
+        (
+            "GET",
+            "/api/v1/documents/{document_id}/versions/{version_id}/downloads/pdf",
+        ): "application/pdf",
+    }
+    for key, media_type in generated_downloads.items():
+        assert set(operations[key]["responses"]["200"]["content"]) == {media_type}
+    for key in list(generated_downloads)[1:]:
+        assert "Content-Disposition" in operations[key]["responses"]["200"]["headers"]

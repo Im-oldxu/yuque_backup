@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     def content_root(self) -> Path:
         return self.data_root / "content"
 
+    @property
+    def exports_root(self) -> Path:
+        return self.data_root / "exports"
+
     def ensure_database_directory(self) -> None:
         if self.db_path is not None:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,6 +91,10 @@ class Settings(BaseSettings):
     def ensure_content_directories(self) -> None:
         self.content_root.mkdir(parents=True, exist_ok=True)
         (self.content_root / ".tmp").mkdir(parents=True, exist_ok=True)
+
+    def ensure_export_directories(self) -> None:
+        self.exports_root.mkdir(parents=True, exist_ok=True)
+        (self.exports_root / ".tmp").mkdir(parents=True, exist_ok=True)
 
     def ensure_directories(self) -> None:
         self.ensure_database_directory()

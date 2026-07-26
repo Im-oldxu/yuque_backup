@@ -45,6 +45,7 @@ from app.integrations.yuque.client import (
     payload_list,
     payload_object,
 )
+from app.modules.exports import normalize_document_markdown
 from app.modules.preview import (
     ResourceCandidate,
     build_document_preview,
@@ -786,6 +787,15 @@ class SyncExecutor:
             rate_limit = table_pages.rate_limit
         self._persist_rate(credential.id, rate_limit)
 
+        if not _has_usable_document_body(data):
+            self._handle_terminal_error(
+                item,
+                worker_id,
+                code="DOCUMENT_BODY_EMPTY",
+                message="Yuque returned no readable document body",
+            )
+            return
+
         candidates = extract_resource_candidates(data)
         resource_completed = 0
         self._set_document_activity(
@@ -872,6 +882,10 @@ class SyncExecutor:
         content_hash = normalized_content_hash(metadata)
         self._remove_purged_version_files(document.id, content_hash)
         raw_body, body_format = _raw_body_and_format(safe_data)
+        markdown = normalize_document_markdown(
+            safe_data,
+            title=str(safe_data.get("title") or document.title),
+        )
         resource_manifest = [self._resource_manifest(outcome, token) for outcome in outcomes]
         committed = self._store.commit_version(
             job_id=item.job_id or "operation",
@@ -881,6 +895,7 @@ class SyncExecutor:
             raw_response=safe_raw_response,
             raw_body=raw_body,
             body_format=body_format,
+            markdown=markdown,
             preview_html=_redact_text(preview.html, token),
             normalized_metadata=metadata,
             resources=resource_manifest,
@@ -1107,6 +1122,7 @@ class SyncExecutor:
             paths = (
                 version.raw_response_path,
                 version.raw_body_path,
+                version.markdown_path,
                 version.preview_path,
                 version.manifest_path,
             )
@@ -1157,6 +1173,7 @@ class SyncExecutor:
                     completeness=completeness,
                     raw_response_path=committed.raw_response_path,
                     raw_body_path=committed.raw_body_path,
+                    markdown_path=committed.markdown_path,
                     preview_path=committed.preview_path,
                     manifest_path=committed.manifest_path,
                     content_size_bytes=committed.content_size_bytes,
@@ -1186,6 +1203,7 @@ class SyncExecutor:
                     version.completeness = completeness
                     version.raw_response_path = committed.raw_response_path
                     version.raw_body_path = committed.raw_body_path
+                    version.markdown_path = committed.markdown_path
                     version.preview_path = committed.preview_path
                     version.manifest_path = committed.manifest_path
                     version.content_size_bytes = committed.content_size_bytes
@@ -2326,10 +2344,24 @@ def _raw_body_and_format(data: dict[str, Any]) -> tuple[str, str | None]:
     for key in (preferred_key, "body", "body_html", "body_lake", "body_sheet", "body_table"):
         value = data.get(key)
         if isinstance(value, str):
-            return value, body_format or fallback_format
+            if value.strip():
+                return value, body_format or fallback_format
+            continue
         if value is not None:
             return json.dumps(value, ensure_ascii=False, sort_keys=True), body_format or fallback_format
     return "", body_format or fallback_format
+
+
+def _has_usable_document_body(data: dict[str, Any]) -> bool:
+    for key in ("body", "body_html", "body_lake", "body_sheet", "body_table"):
+        value = data.get(key)
+        if isinstance(value, str):
+            if value.strip():
+                return True
+        elif value is not None:
+            return True
+    pages = data.get("body_table_pages")
+    return isinstance(pages, list) and any(page is not None for page in pages)
 
 
 def _merge_table_page_data(pages: list[dict[str, Any]]) -> dict[str, Any]:

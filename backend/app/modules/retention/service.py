@@ -79,6 +79,7 @@ class RetentionService:
             unfinished_purge = DocumentVersion.purged_at.is_not(None) & or_(
                 DocumentVersion.raw_response_path.is_not(None),
                 DocumentVersion.raw_body_path.is_not(None),
+                DocumentVersion.markdown_path.is_not(None),
                 DocumentVersion.preview_path.is_not(None),
                 DocumentVersion.manifest_path.is_not(None),
             )
@@ -101,6 +102,7 @@ class RetentionService:
             paths = (
                 version.raw_response_path,
                 version.raw_body_path,
+                version.markdown_path,
                 version.preview_path,
                 version.manifest_path,
             )
@@ -130,6 +132,7 @@ class RetentionService:
             session.execute(delete(VersionAsset).where(VersionAsset.version_id == version_id))
             version.raw_response_path = None
             version.raw_body_path = None
+            version.markdown_path = None
             version.preview_path = None
             version.manifest_path = None
             version.content_size_bytes = 0
@@ -216,6 +219,7 @@ class RetentionService:
                         for path in (
                             version.raw_response_path,
                             version.raw_body_path,
+                            version.markdown_path,
                             version.preview_path,
                             version.manifest_path,
                         )

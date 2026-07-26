@@ -15,6 +15,7 @@ button, input, select, textarea { letter-spacing: 0; }
 [data-slot='card'], .yb-panel { border-radius: 8px; }
 
 .yb-page { width: min(100%, 1480px); margin-inline: auto; padding: 24px; }
+.yb-reader-page { width: min(100%, 1800px); }
 .yb-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
 .yb-page-title { font-size: 1.5rem; font-weight: 650; line-height: 1.25; }
 .yb-page-description { margin-top: 6px; color: var(--muted-foreground); font-size: 0.875rem; line-height: 1.5; }
@@ -25,12 +26,69 @@ button, input, select, textarea { letter-spacing: 0; }
 .yb-grid-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .yb-empty-row { padding: 48px 16px; text-align: center; color: var(--muted-foreground); }
 
+.yb-markdown {
+  color: #1f2937;
+  font-size: 16px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.yb-markdown > :first-child { margin-top: 0; }
+.yb-markdown > :last-child { margin-bottom: 0; }
+.yb-markdown h1,
+.yb-markdown h2,
+.yb-markdown h3,
+.yb-markdown h4,
+.yb-markdown h5,
+.yb-markdown h6 {
+  color: #111827;
+  font-weight: 650;
+  line-height: 1.4;
+  scroll-margin-top: 96px;
+}
+.yb-markdown h1 { margin: 0 0 24px; border-bottom: 1px solid #e5e7eb; padding-bottom: 12px; font-size: 2rem; }
+.yb-markdown h2 { margin: 40px 0 16px; border-bottom: 1px solid #eef0f3; padding-bottom: 8px; font-size: 1.5rem; }
+.yb-markdown h3 { margin: 32px 0 12px; font-size: 1.25rem; }
+.yb-markdown h4 { margin: 28px 0 10px; font-size: 1.08rem; }
+.yb-markdown h5,
+.yb-markdown h6 { margin: 24px 0 8px; font-size: 1rem; }
+.yb-markdown p,
+.yb-markdown ul,
+.yb-markdown ol,
+.yb-markdown blockquote,
+.yb-markdown pre,
+.yb-markdown table,
+.yb-markdown figure { margin: 0 0 18px; }
+.yb-markdown ul,
+.yb-markdown ol { padding-left: 1.6rem; }
+.yb-markdown ul { list-style: disc; }
+.yb-markdown ol { list-style: decimal; }
+.yb-markdown li + li { margin-top: 5px; }
+.yb-markdown a { color: #175cd3; text-decoration: underline; text-decoration-color: #b2ccff; text-underline-offset: 3px; }
+.yb-markdown a:hover { color: #1849a9; text-decoration-color: currentColor; }
+.yb-markdown blockquote { border-left: 3px solid #98a2b3; background: #f9fafb; color: #475467; padding: 12px 16px; }
+.yb-markdown blockquote > :last-child { margin-bottom: 0; }
+.yb-markdown hr { margin: 32px 0; border: 0; border-top: 1px solid #d0d5dd; }
+.yb-markdown img { display: block; max-width: 100%; height: auto; margin: 20px auto; }
+.yb-markdown table { display: block; width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 0.9375rem; }
+.yb-markdown th,
+.yb-markdown td { min-width: 7rem; border: 1px solid #d0d5dd; padding: 9px 12px; text-align: left; vertical-align: top; }
+.yb-markdown th { background: #f9fafb; color: #344054; font-weight: 650; }
+.yb-markdown code:not(pre code) { border: 1px solid #e4e7ec; border-radius: 4px; background: #f2f4f7; color: #b42318; padding: 1px 5px; font: 0.88em/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.yb-markdown pre { overflow-x: auto; border: 1px solid #e4e7ec; border-radius: 6px; padding: 16px; font-size: 0.875rem; line-height: 1.65; }
+.yb-markdown pre.shiki { background: #f8fafc !important; }
+.yb-markdown pre code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.yb-markdown details { margin-bottom: 18px; border: 1px solid #d0d5dd; padding: 10px 14px; }
+.yb-markdown summary { cursor: pointer; font-weight: 600; }
+
 @media (max-width: 1023px) { .yb-grid-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 767px) {
   .yb-page { padding: 16px; }
   .yb-page-header { align-items: stretch; flex-direction: column; }
   .yb-grid-metrics { grid-template-columns: 1fr; }
   .yb-page-title { font-size: 1.25rem; }
+  .yb-markdown { font-size: 15px; }
+  .yb-markdown h1 { font-size: 1.65rem; }
+  .yb-markdown h2 { font-size: 1.35rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: 0.01ms !important; }

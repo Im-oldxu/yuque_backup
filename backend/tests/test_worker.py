@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings
 from app.core.models import (
     Asset,
+    BackupIssue,
     BackupJob,
     BackupSubtask,
     Base,
@@ -40,6 +41,7 @@ from app.worker.queue import (
     next_quota_retry_at,
 )
 from app.worker.service import WorkerService
+from app.worker.sync import _has_usable_document_body, _raw_body_and_format
 
 
 @dataclass
@@ -66,6 +68,144 @@ def make_settings(tmp_path: Path) -> Settings:
         database_url=f"sqlite:///{tmp_path / 'test.sqlite3'}",
         yuque_request_interval_seconds=0,
     )
+
+
+def test_document_body_helpers_skip_blank_preferred_fields() -> None:
+    data = {
+        "type": "Doc",
+        "format": "markdown",
+        "body": "  \n",
+        "body_html": "<p>Readable fallback</p>",
+    }
+
+    assert _has_usable_document_body(data) is True
+    assert _raw_body_and_format(data) == ("<p>Readable fallback</p>", "markdown")
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"body": "", "body_html": " \n", "body_lake": ""},
+        {"type": "Table", "body_table": None, "body_table_pages": []},
+    ],
+)
+def test_document_body_helpers_reject_empty_payloads(data: dict[str, object]) -> None:
+    assert _has_usable_document_body(data) is False
+
+
+@pytest.mark.asyncio
+async def test_empty_document_body_fails_without_committing_version(tmp_path: Path) -> None:
+    sessions = make_session_factory(tmp_path)
+    settings = make_settings(tmp_path)
+    clock = Clock(datetime(2026, 7, 23, 12, 0, tzinfo=UTC))
+    credential_id = "11111111-1111-4111-8111-111111111111"
+    encrypted, nonce = encrypt_token("token", credential_id, settings)
+    with sessions.begin() as session:
+        credential = YuqueCredential(
+            id=credential_id,
+            name="main",
+            base_url="https://www.yuque.com",
+            encrypted_token=encrypted,
+            token_nonce=nonce,
+            token_suffix="oken",
+            subject_type="user",
+            subject_id="u1",
+            login="alice",
+            status="valid",
+            enabled=True,
+            verification_valid=True,
+        )
+        repository = Repository(
+            normalized_base_url="https://www.yuque.com",
+            yuque_book_id="empty-book",
+            name="Empty body",
+            selected=True,
+        )
+        session.add_all([credential, repository])
+        session.flush()
+        document = Document(
+            repository_id=repository.id,
+            yuque_doc_id="empty-document",
+            title="Empty document",
+            slug="empty-document",
+        )
+        job = BackupJob(
+            trigger="manual",
+            scope={"type": "repository", "repository_id": repository.id},
+            status="running",
+            active_slot=1,
+        )
+        session.add_all([document, job])
+        session.flush()
+        subtask = BackupSubtask(
+            job_id=job.id,
+            repository_id=repository.id,
+            credential_id=credential.id,
+            status="running",
+            document_total=1,
+        )
+        session.add(subtask)
+        session.flush()
+        queue_item = QueueItem(
+            category="document_sync",
+            payload={},
+            available_at=clock.now(),
+            idempotency_key=f"job:{job.id}:document:{document.id}",
+            job_id=job.id,
+            subtask_id=subtask.id,
+            credential_id=credential.id,
+            repository_id=repository.id,
+            document_id=document.id,
+        )
+        session.add(queue_item)
+        session.flush()
+        document_id = document.id
+        queue_item_id = queue_item.id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v2/repos/docs/empty-document"
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "id": "empty-document",
+                    "title": "Empty document",
+                    "type": "Doc",
+                    "format": "lake",
+                    "body": "",
+                    "body_html": "  ",
+                    "body_lake": "",
+                }
+            },
+            headers={"X-RateLimit-Limit": "5000", "X-RateLimit-Remaining": "4999"},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+    service = WorkerService(
+        sessions,
+        settings,
+        worker_id="empty-body-worker",
+        yuque_http_client=client,
+        resource_http_client=client,
+        now=clock.now,
+    )
+
+    assert await service.run_once() is True
+    with sessions() as session:
+        stored_document = session.get(Document, document_id)
+        stored_item = session.get(QueueItem, queue_item_id)
+        issue = session.scalar(select(BackupIssue).where(BackupIssue.document_id == document_id))
+        stored_version = session.scalar(
+            select(DocumentVersion).where(DocumentVersion.document_id == document_id)
+        )
+        assert stored_version is None
+        assert stored_document is not None and stored_document.latest_successful_version_id is None
+        assert stored_item is not None and stored_item.status == "failed"
+        assert issue is not None and issue.code == "DOCUMENT_BODY_EMPTY"
+
+    await service.aclose()
+    await client.aclose()
 
 
 def test_queue_recovers_leases_and_uses_documented_retry_delays(tmp_path: Path) -> None:

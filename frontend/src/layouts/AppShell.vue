@@ -133,7 +133,7 @@ async function logout() {
           <Moon v-else />
         </Button>
       </header>
-      <main class="min-w-0 flex-1 overflow-x-hidden"><RouterView /></main>
+      <main class="min-w-0 flex-1 overflow-x-clip"><RouterView /></main>
     </SidebarInset>
   </SidebarProvider>
 </template>

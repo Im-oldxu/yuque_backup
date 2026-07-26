@@ -111,7 +111,7 @@ export interface DocumentDetail extends DocumentSummary {
 
 export interface VersionDetail extends VersionSummary {
   document_id: string
-  downloads: { raw_response: boolean; raw_body: boolean; offline_html: boolean }
+  downloads: { raw_response: boolean; raw_body: boolean; markdown: boolean; offline_html: boolean; pdf: boolean }
   asset_summary: { total: number; downloaded: number; failed: number; skipped: number }
 }
 

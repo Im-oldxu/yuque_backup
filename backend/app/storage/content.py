@@ -23,6 +23,7 @@ _BODY_EXTENSIONS = {
 class CommittedVersion:
     raw_response_path: str
     raw_body_path: str
+    markdown_path: str
     preview_path: str | None
     manifest_path: str
     content_size_bytes: int
@@ -66,6 +67,7 @@ class ContentStore:
         raw_response: Any,
         raw_body: str | bytes,
         body_format: str | None,
+        markdown: str,
         preview_html: str | None,
         normalized_metadata: dict[str, Any],
         resources: list[dict[str, Any]],
@@ -83,6 +85,7 @@ class ContentStore:
         files: dict[str, bytes] = {
             "raw-response.json": canonical_json_bytes(raw_response),
             f"body.{body_extension}": body_bytes,
+            "export.md": markdown.encode("utf-8"),
         }
         if preview_html is not None:
             files["preview.html"] = preview_html.encode("utf-8")
@@ -119,6 +122,7 @@ class ContentStore:
         return CommittedVersion(
             raw_response_path=f"{prefix}/raw-response.json",
             raw_body_path=f"{prefix}/body.{body_extension}",
+            markdown_path=f"{prefix}/export.md",
             preview_path=preview_path,
             manifest_path=f"{prefix}/manifest.json",
             content_size_bytes=sum(len(value) for value in files.values()),

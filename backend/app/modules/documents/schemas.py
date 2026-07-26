@@ -55,7 +55,9 @@ class DocumentDetail(DocumentSummary):
 class DownloadAvailability(APIModel):
     raw_response: bool
     raw_body: bool
+    markdown: bool
     offline_html: bool
+    pdf: bool
 
 
 class AssetSummary(APIModel):

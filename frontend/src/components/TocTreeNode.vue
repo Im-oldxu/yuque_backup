@@ -2,9 +2,17 @@
 import { ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { BookOpenText, ChevronDown, FileText } from 'lucide-vue-next'
-import type { TocNode } from '@/api'
+import type { DocumentSummary, TocNode } from '@/api'
+import DocumentBackupStatus from './DocumentBackupStatus.vue'
 
-defineProps<{ node: TocNode; activeDocumentId?: string }>()
+withDefaults(defineProps<{
+  node: TocNode
+  activeDocumentId?: string
+  documentStatuses?: Record<string, DocumentSummary | undefined>
+}>(), {
+  activeDocumentId: undefined,
+  documentStatuses: () => ({}),
+})
 const open = ref(true)
 </script>
 
@@ -26,6 +34,11 @@ const open = ref(true)
       <RouterLink v-if="node.document_id" :to="`/documents/${node.document_id}`" class="flex min-w-0 flex-1 items-center gap-2 self-stretch pr-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <FileText class="size-4 shrink-0 text-muted-foreground" />
         <span class="truncate">{{ node.title }}</span>
+        <DocumentBackupStatus
+          v-if="documentStatuses[node.document_id]"
+          :latest-version-id="documentStatuses[node.document_id]?.latest_version_id"
+          :completeness="documentStatuses[node.document_id]?.latest_version_completeness"
+        />
       </RouterLink>
       <div v-else class="flex min-w-0 flex-1 items-center gap-2 self-stretch pr-2 font-medium text-muted-foreground">
         <BookOpenText class="size-4 shrink-0" />
@@ -33,7 +46,7 @@ const open = ref(true)
       </div>
     </div>
     <ul v-if="node.children.length && open" class="ml-3 flex flex-col gap-0.5 border-l pl-2">
-      <TocTreeNode v-for="child in node.children" :key="child.id" :node="child" :active-document-id="activeDocumentId" />
+      <TocTreeNode v-for="child in node.children" :key="child.id" :node="child" :active-document-id="activeDocumentId" :document-statuses="documentStatuses" />
     </ul>
   </li>
 </template>

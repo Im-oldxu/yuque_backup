@@ -7,7 +7,7 @@ from typing import NoReturn
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -20,6 +20,7 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("api", help="serve the embedded frontend and REST API")
     commands.add_parser("worker", help="run the single persistent backup worker")
     commands.add_parser("migrate", help="upgrade the database schema to the current head")
+    commands.add_parser("export", help="backfill Markdown and rebuild readable export directories")
 
     health = commands.add_parser("healthcheck", help="check an API or worker process")
     health.add_argument("target", choices=("api", "worker"), nargs="?", default="api")
@@ -78,6 +79,19 @@ def main(argv: list[str] | None = None) -> int:
         from app.core.migrations import upgrade_database
 
         upgrade_database()
+        return 0
+    if args.command == "export":
+        from app.core.config import get_settings
+        from app.core.database import SessionLocal, engine
+        from app.core.migrations import database_is_at_head
+        from app.modules.exports import ExportService
+
+        settings = get_settings()
+        settings.ensure_directories()
+        if not database_is_at_head(engine):
+            raise RuntimeError("database schema is not at the Alembic head; run migrations before export")
+        count = ExportService(SessionLocal, settings).prepare(create_initial_snapshot=True)
+        print(f"Backfilled {count} Markdown version(s); readable exports are up to date.")
         return 0
     if args.command == "healthcheck":
         return _api_healthcheck(args.url) if args.target == "api" else _worker_healthcheck()

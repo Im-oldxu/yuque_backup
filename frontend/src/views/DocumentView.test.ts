@@ -9,14 +9,13 @@ const apiMock = vi.hoisted(() => ({
   assetDownloadUrl: vi.fn(),
   downloadUrl: vi.fn(),
   getDocument: vi.fn(),
-  getPreviewHtml: vi.fn(),
+  getMarkdown: vi.fn(),
   getRepositories: vi.fn(),
   getToc: vi.fn(),
   getVersion: vi.fn(),
   getVersionAssets: vi.fn(),
   getVersionIssues: vi.fn(),
   getVersions: vi.fn(),
-  previewUrl: vi.fn(),
   search: vi.fn(),
 }))
 
@@ -27,6 +26,14 @@ vi.mock('@/api', () => ({
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn() }),
+}))
+
+vi.mock('@/utils/markdown-renderer', () => ({
+  renderMarkdown: vi.fn(async (markdown: string) => ({
+    html: `<h1 id="outline">${markdown}</h1>`,
+    headings: [{ id: 'outline', text: '大纲', level: 1 }],
+    hasReadableContent: Boolean(markdown),
+  })),
 }))
 
 import DocumentView from './DocumentView.vue'
@@ -81,13 +88,14 @@ function versionDetail(documentId: string, summary: VersionSummary): VersionDeta
   return {
     ...summary,
     document_id: documentId,
-    downloads: { raw_response: true, raw_body: true, offline_html: true },
+    downloads: { raw_response: true, raw_body: true, markdown: true, offline_html: true, pdf: true },
     asset_summary: { total: 0, downloaded: 0, failed: 0, skipped: 0 },
   }
 }
 
 describe('DocumentView request ownership', () => {
   beforeEach(() => {
+    apiMock.getMarkdown.mockReset().mockResolvedValue('# 大纲')
     apiMock.getRepositories.mockReset().mockResolvedValue({
       items: [{
         id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
@@ -143,7 +151,6 @@ describe('DocumentView request ownership', () => {
     apiMock.getVersion.mockResolvedValue(versionDetail(documentId, summary))
     apiMock.getVersionAssets.mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0 })
     apiMock.getVersionIssues.mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0 })
-    apiMock.getPreviewHtml.mockResolvedValue('<h1 id="outline">大纲</h1>')
     apiMock.getToc.mockResolvedValue({ repository_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', updated_at: '2026-07-23T00:00:00Z', items: [] })
 
     shallowMount(DocumentView, { props: { documentId } })
@@ -192,7 +199,6 @@ describe('DocumentView request ownership', () => {
     apiMock.getVersion.mockResolvedValue(versionDetail(documentId, latestSuccessful))
     apiMock.getVersionAssets.mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0 })
     apiMock.getVersionIssues.mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0 })
-    apiMock.getPreviewHtml.mockResolvedValue('<h1>大纲</h1>')
     apiMock.getToc.mockResolvedValue({ repository_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', updated_at: '2026-07-23T00:00:00Z', items: [] })
 
     shallowMount(DocumentView, { props: { documentId } })
@@ -221,7 +227,7 @@ describe('DocumentView request ownership', () => {
     apiMock.getVersion.mockResolvedValue(versionDetail(documentA, summary))
     apiMock.getVersionAssets.mockReturnValue(pendingAssets.promise)
     apiMock.getVersionIssues.mockReturnValue(pendingIssues.promise)
-    apiMock.getPreviewHtml.mockReturnValue(pendingOutline.promise)
+    apiMock.getMarkdown.mockReturnValue(pendingOutline.promise)
     apiMock.getToc.mockResolvedValue({ repository_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', updated_at: '2026-07-23T00:00:00Z', items: [] })
 
     const wrapper = shallowMount(DocumentView, {
@@ -229,7 +235,7 @@ describe('DocumentView request ownership', () => {
       global: { stubs: { AsyncState: { template: '<div><slot /></div>' } } },
     })
     await flushPromises()
-    expect(apiMock.getPreviewHtml).toHaveBeenCalled()
+    expect(apiMock.getMarkdown).toHaveBeenCalled()
 
     await wrapper.setProps({ documentId: documentB })
     await flushPromises()

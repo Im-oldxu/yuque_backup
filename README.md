@@ -1,13 +1,14 @@
 # Yuque Backup
 
-Yuque Backup 是面向单管理员、自托管场景的语雀只读备份系统。v1.2.0 提供多凭据管理与编辑、知识库发现与选择、带额度预估的手动/定时备份向导、持久化备份队列、增量版本与附件保存、安全预览、实时任务活动、删除保留及本地离线浏览，并增加前后端统一可执行文件与一体化 Docker 发布。
+Yuque Backup 是面向单管理员、自托管场景的语雀只读备份系统。v1.3.0 在多凭据增量备份、版本与附件保存、安全预览和离线浏览基础上，增加标准化 Markdown、按需 PDF 下载、可读导出快照、文章大纲与备份状态，并提供 Linux/Windows 原生发布归档。
 
 ## 项目结构
 
 - `frontend/`：Vue 3、TypeScript、Vite/Rolldown 管理端，支持 Mock 和真实 API 模式；
 - `backend/`：FastAPI API、独立 worker、SQLite、Alembic 和本地内容存储；
 - `deploy/`：前后端统一可执行文件的多阶段 Dockerfile、Compose 与环境变量示例；
-- `需求文档.md`、`技术方案文档.md`、`API 接口文档.md`：v1.2.0 产品、技术和接口契约。
+- `需求文档.md`、`技术方案文档.md`、`API 接口文档.md`：v1.3.0 产品、技术和接口契约；
+- `CHANGE/`：每个 SemVer Tag 对应的独立发布说明。
 
 ## 快速开始
 
@@ -25,12 +26,12 @@ corepack pnpm dev:real
 
 默认访问地址为 `http://127.0.0.1:3002/#/auth`，后端开发文档为 `http://127.0.0.1:8000/docs`。
 
-## v1.2.0 验证基线
+## v1.3.0 交付基线
 
-- 后端：Ruff、Mypy、`uv lock --check` 和 118 个 Pytest 测试通过；
-- 前端：17 个 Vitest 测试文件、61 个测试、Vue/TypeScript 类型检查和生产构建通过；
-- 契约：OpenAPI 47 条路径、53 个操作；
-- 交付：Windows 单文件程序已通过版本、迁移、嵌入式首页、初始化 API、API ready 和 worker 心跳冒烟验证；CI 同步覆盖 Linux 单文件程序、容器镜像和 Compose。
+- 契约：OpenAPI 50 条路径、56 个操作，数据库迁移 head 为 `0002`；
+- 数据：每个版本保存标准化 `export.md`，worker 维护 `/data/exports/latest` 和带清单的任务快照；升级后可运行 `yuque-backup export` 回填历史版本；
+- 阅读：浏览器使用经过 DOMPurify 清理的 Markdown、Shiki 本地代码高亮、响应式文章大纲和备份状态，支持 Markdown/PDF 下载；
+- 交付：GitHub Release 在同一 Tag/提交的 CI 成功后发布 Linux amd64/arm64、Windows amd64 归档和 `checksums.txt`，并发布多架构 Docker 镜像。
 
 ## 范围
 

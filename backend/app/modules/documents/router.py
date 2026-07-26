@@ -4,9 +4,10 @@ import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import aliased
 from starlette.responses import MalformedRangeHeader, RangeNotSatisfiable
@@ -42,6 +43,8 @@ from app.modules.documents.service import (
     serialize_version,
     serialize_version_detail,
 )
+from app.modules.exports import markdown_for_version
+from app.modules.exports.pdf import render_markdown_pdf
 
 router = APIRouter(prefix="/api/v1", tags=["documents"])
 
@@ -123,6 +126,10 @@ def _file_response(
             field_errors=[{"field": "Range", "reason": "invalid"}],
         ) from None
     return response
+
+
+def _attachment(filename: str) -> str:
+    return f"attachment; filename=\"download\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
 @router.get(
@@ -478,6 +485,102 @@ def download_raw_body(
         path,
         media_type=media_type,
         filename=safe_filename(f"{document.title}.{extension}", f"body.{extension}"),
+    )
+
+
+@router.get(
+    "/documents/{document_id}/versions/{version_id}/markdown",
+    response_class=Response,
+    status_code=200,
+    responses=documented_responses(
+        401,
+        404,
+        410,
+        422,
+        success_content=binary_content("text/markdown"),
+    ),
+)
+def read_markdown(
+    document_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: DbSession,
+    _admin: CurrentAdmin,
+) -> Response:
+    document, version = _version_file(db, document_id, version_id)
+    if version.purged_at is not None:
+        raise AppError(410, "VERSION_CONTENT_PURGED", "版本内容已按保留策略清理")
+    markdown = markdown_for_version(version, document, get_settings())
+    return Response(
+        markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.get(
+    "/documents/{document_id}/versions/{version_id}/downloads/markdown",
+    response_class=Response,
+    status_code=200,
+    responses=documented_responses(
+        401,
+        404,
+        410,
+        422,
+        success_content=binary_content("text/markdown"),
+        success_headers=_DOWNLOAD_RESPONSE_HEADERS,
+    ),
+)
+def download_markdown(
+    document_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: DbSession,
+    _admin: CurrentAdmin,
+) -> Response:
+    document, version = _version_file(db, document_id, version_id)
+    if version.purged_at is not None:
+        raise AppError(410, "VERSION_CONTENT_PURGED", "版本内容已按保留策略清理")
+    markdown = markdown_for_version(version, document, get_settings())
+    filename = safe_filename(f"{document.title}.md", "article.md")
+    return Response(
+        markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": _attachment(filename)},
+    )
+
+
+@router.get(
+    "/documents/{document_id}/versions/{version_id}/downloads/pdf",
+    response_class=Response,
+    status_code=200,
+    responses=documented_responses(
+        401,
+        404,
+        410,
+        422,
+        503,
+        success_content=binary_content("application/pdf"),
+        success_headers=_DOWNLOAD_RESPONSE_HEADERS,
+    ),
+)
+def download_pdf(
+    document_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: DbSession,
+    _admin: CurrentAdmin,
+) -> Response:
+    document, version = _version_file(db, document_id, version_id)
+    if version.purged_at is not None:
+        raise AppError(410, "VERSION_CONTENT_PURGED", "版本内容已按保留策略清理")
+    markdown = markdown_for_version(version, document, get_settings())
+    try:
+        content = render_markdown_pdf(markdown)
+    except (OSError, RuntimeError) as exc:
+        raise AppError(503, "PDF_EXPORT_UNAVAILABLE", "PDF 导出服务暂不可用") from exc
+    filename = safe_filename(f"{document.title}.pdf", "article.pdf")
+    return Response(
+        content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": _attachment(filename)},
     )
 
 

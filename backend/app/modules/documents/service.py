@@ -146,13 +146,14 @@ def serialize_document_detail(db: Session, document: Document) -> DocumentDetail
 
 
 def serialize_version_detail(db: Session, version: DocumentVersion, document: Document) -> VersionDetail:
-    counts: dict[str, int] = dict(
-        db.execute(
+    counts: dict[str, int] = {
+        status: count
+        for status, count in db.execute(
             select(VersionAsset.status, func.count(VersionAsset.id))
             .where(VersionAsset.version_id == version.id)
             .group_by(VersionAsset.status)
         ).tuples()
-    )
+    }
     summary = serialize_version(version, document)
     return VersionDetail(
         **summary.model_dump(),
@@ -160,7 +161,9 @@ def serialize_version_detail(db: Session, version: DocumentVersion, document: Do
         downloads=DownloadAvailability(
             raw_response=bool(version.raw_response_path and version.purged_at is None),
             raw_body=bool(version.raw_body_path and version.purged_at is None),
+            markdown=bool(version.purged_at is None),
             offline_html=bool(version.preview_path and version.purged_at is None),
+            pdf=bool(version.purged_at is None),
         ),
         asset_summary=AssetSummary(
             total=sum(counts.values()),

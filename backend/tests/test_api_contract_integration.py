@@ -1235,6 +1235,169 @@ def test_backup_job_estimate_and_selected_repository_quota_gate(
         assert job.scope["_target_repository_ids"] == [repository_ids[0]]
 
 
+def test_version_detail_returns_asset_status_summary(api_harness: ApiHarness) -> None:
+    repository_id = str(uuid.uuid4())
+    source_job_id = str(uuid.uuid4())
+    document_id = str(uuid.uuid4())
+    version_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+
+    with api_harness.sessions.begin() as db:
+        db.add(
+            Repository(
+                id=repository_id,
+                normalized_base_url="https://www.yuque.com",
+                yuque_book_id="version-detail-book",
+                name="version-detail-repository",
+                selected=True,
+            )
+        )
+        db.add(
+            BackupJob(
+                id=source_job_id,
+                trigger="manual",
+                scope={"type": "repository", "repository_id": repository_id},
+                status="succeeded",
+                active_slot=None,
+                pending_slot=None,
+                finished_at=now,
+            )
+        )
+        db.flush()
+        document = Document(
+            id=document_id,
+            repository_id=repository_id,
+            yuque_doc_id="version-detail-document",
+            type="Doc",
+            title="Version detail",
+            path="/version-detail",
+            original_path="/version-detail",
+        )
+        db.add(document)
+        db.flush()
+        db.add(
+            DocumentVersion(
+                id=version_id,
+                document_id=document_id,
+                format="lake",
+                content_hash="9" * 64,
+                completeness="partial",
+                normalized_metadata={"format": "lake"},
+                resource_total=4,
+                resource_downloaded=1,
+                issue_count=1,
+                source_job_id=source_job_id,
+            )
+        )
+        db.flush()
+        document.latest_successful_version_id = version_id
+        db.add_all(
+            [
+                VersionAsset(
+                    version_id=version_id,
+                    original_url=f"https://cdn.example.invalid/{status}.bin",
+                    normalized_url=f"https://cdn.example.invalid/{status}.bin",
+                    name=f"{status}.bin",
+                    type="attachment",
+                    status=status,
+                )
+                for status in ("downloaded", "failed", "skipped", "pending")
+            ]
+        )
+
+    response = api_harness.client.get(
+        f"/api/v1/documents/{document_id}/versions/{version_id}"
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == version_id
+    assert body["document_id"] == document_id
+    assert body["is_latest"] is True
+    assert body["completeness"] == "partial"
+    assert body["asset_summary"] == {
+        "total": 4,
+        "downloaded": 1,
+        "failed": 1,
+        "skipped": 1,
+    }
+    assert body["metadata"] == {"format": "lake"}
+
+
+def test_markdown_and_pdf_exports_use_normalized_article_content(api_harness: ApiHarness) -> None:
+    repository_id = str(uuid.uuid4())
+    source_job_id = str(uuid.uuid4())
+    document_id = str(uuid.uuid4())
+    version_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    with api_harness.sessions.begin() as db:
+        repository = Repository(
+            id=repository_id,
+            normalized_base_url="https://www.yuque.com",
+            yuque_book_id="export-book",
+            name="Export repository",
+        )
+        job = BackupJob(
+            id=source_job_id,
+            trigger="manual",
+            scope={"type": "repository", "repository_id": repository_id},
+            status="succeeded",
+            finished_at=now,
+        )
+        document = Document(
+            id=document_id,
+            repository_id=repository_id,
+            yuque_doc_id="export-document",
+            type="Doc",
+            title="导出/测试",
+            path="/export",
+            original_path="/export",
+        )
+        version = DocumentVersion(
+            id=version_id,
+            document_id=document_id,
+            format="lake",
+            content_hash="8" * 64,
+            completeness="complete",
+            normalized_metadata={
+                "type": "Doc",
+                "title": "导出/测试",
+                "body": "[TOC]\n\n# 导出测试\n\n正文\n\n![图](https://cdn.example/a.png)",
+            },
+            source_job_id=source_job_id,
+        )
+        document.latest_successful_version_id = version.id
+        db.add_all([repository, job, document, version])
+
+    markdown = api_harness.client.get(
+        f"/api/v1/documents/{document_id}/versions/{version_id}/markdown"
+    )
+    assert markdown.status_code == 200, markdown.text
+    assert markdown.headers["content-type"].startswith("text/markdown")
+    assert "[TOC]" not in markdown.text
+    assert "https://cdn.example/a.png" in markdown.text
+
+    download = api_harness.client.get(
+        f"/api/v1/documents/{document_id}/versions/{version_id}/downloads/markdown"
+    )
+    assert download.status_code == 200
+    assert "filename*=UTF-8''" in download.headers["content-disposition"]
+    assert download.text == markdown.text
+
+    pdf = api_harness.client.get(
+        f"/api/v1/documents/{document_id}/versions/{version_id}/downloads/pdf"
+    )
+    assert pdf.status_code == 200, pdf.text
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert pdf.content.startswith(b"%PDF")
+
+    with TestClient(api_harness.app, raise_server_exceptions=False) as anonymous:
+        unauthorized = anonymous.get(
+            f"/api/v1/documents/{document_id}/versions/{version_id}/downloads/markdown"
+        )
+    assert unauthorized.status_code == 401
+
+
 def test_asset_download_enforces_auth_range_gone_not_found_and_path_boundary(
     api_harness: ApiHarness,
 ) -> None:

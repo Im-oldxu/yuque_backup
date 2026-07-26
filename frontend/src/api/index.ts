@@ -63,6 +63,9 @@ export const api = {
   getVersionAssets: (documentId: string, versionId: string, filters: AssetListParams = {}) => request<Paginated<AssetReference>>(`/documents/${documentId}/versions/${versionId}/assets${listQuery(filters)}`),
   getVersionIssues: (documentId: string, versionId: string, filters: IssueListParams = {}) => request<Paginated<BackupIssue>>(`/documents/${documentId}/versions/${versionId}/issues${listQuery(filters)}`),
   getPreviewHtml: (documentId: string, versionId: string) => API_MODE === 'mock' ? fetch('/mock-preview.html').then((response) => response.text()) : httpTextRequest(`/documents/${documentId}/versions/${versionId}/preview`),
+  getMarkdown: (documentId: string, versionId: string) => API_MODE === 'mock'
+    ? Promise.resolve('# 备份与恢复操作手册\n\n> 变更前先确认备份完整。\n\n## 执行步骤\n\n| 阶段 | 检查项 |\n| --- | --- |\n| 备份 | 校验版本与附件 |\n| 恢复 | 验证服务状态 |\n\n### 命令示例\n\n```bash\nyuque-backup export\n```\n\n## 验收结果\n\n正文、表格与代码块均可阅读。')
+    : httpTextRequest(`/documents/${documentId}/versions/${versionId}/markdown`),
 
   getJobs: (filters: JobListParams = {}) => request<Paginated<BackupJob>>(`/backup-jobs${listQuery(filters)}`),
   getJob: (id: string) => request<BackupJob>(`/backup-jobs/${id}`),
@@ -86,7 +89,7 @@ export const api = {
   getTombstone: (id: string) => request<Tombstone>(`/deletion-tombstones/${id}`),
 
   previewUrl: (documentId: string, versionId: string) => API_MODE === 'mock' ? '/mock-preview.html' : `${API_BASE}/documents/${documentId}/versions/${versionId}/preview`,
-  downloadUrl: (documentId: string, versionId: string, kind: 'raw-response' | 'raw-body' | 'offline-html') => API_MODE === 'mock' ? `data:text/plain;charset=utf-8,${encodeURIComponent(`Yuque Backup Mock: ${kind}`)}` : `${API_BASE}/documents/${documentId}/versions/${versionId}/downloads/${kind}`,
+  downloadUrl: (documentId: string, versionId: string, kind: 'raw-response' | 'raw-body' | 'markdown' | 'offline-html' | 'pdf') => API_MODE === 'mock' ? `data:text/plain;charset=utf-8,${encodeURIComponent(`Yuque Backup Mock: ${kind}`)}` : `${API_BASE}/documents/${documentId}/versions/${versionId}/downloads/${kind}`,
   assetDownloadUrl: (assetId: string) => API_MODE === 'mock' ? `data:text/plain;charset=utf-8,${encodeURIComponent(`Mock asset: ${assetId}`)}` : `${API_BASE}/assets/${assetId}/download`,
 }
 
