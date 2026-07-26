@@ -289,6 +289,102 @@ def test_enable_credential_requires_valid_public_status(api_harness: ApiHarness)
     assert enabled.json()["enabled"] is True
 
 
+def test_manual_verify_wakes_waiting_quota_operation(api_harness: ApiHarness) -> None:
+    credential_id = str(uuid.uuid4())
+    retry_at = datetime.now(UTC) + timedelta(hours=1)
+    with api_harness.sessions.begin() as db:
+        credential = YuqueCredential(
+            id=credential_id,
+            name="quota-check",
+            base_url="https://www.yuque.com",
+            encrypted_token=b"encrypted-test-token",
+            token_nonce=b"n" * 12,
+            token_suffix="test",
+            subject_type="user",
+            subject_id="quota-subject",
+            status="waiting_quota",
+            verification_valid=True,
+            enabled=True,
+            next_retry_at=retry_at,
+        )
+        operation = Operation(
+            type="credential_verify",
+            credential_id=credential_id,
+            status="waiting_quota",
+            next_retry_at=retry_at,
+        )
+        db.add_all([credential, operation])
+        db.flush()
+        operation_id = operation.id
+        db.add(
+            QueueItem(
+                category="credential_verify",
+                payload={"credential_id": credential_id, "_quota_attempt": 4},
+                status="retry_wait",
+                available_at=retry_at,
+                next_retry_at=retry_at,
+                idempotency_key=f"operation:{operation_id}",
+                operation_id=operation_id,
+                credential_id=credential_id,
+            )
+        )
+
+    response = api_harness.client.post(
+        f"/api/v1/credentials/{credential_id}/verify",
+        headers=api_harness.csrf_headers,
+    )
+
+    assert response.status_code == 202
+    assert response.json()["id"] == operation_id
+    assert response.json()["status"] == "queued"
+    with api_harness.sessions() as db:
+        stored_credential = db.get(YuqueCredential, credential_id)
+        stored_operation = db.get(Operation, operation_id)
+        queue_item = db.scalar(select(QueueItem).where(QueueItem.operation_id == operation_id))
+        assert stored_credential is not None and stored_credential.next_retry_at is None
+        assert stored_operation is not None and stored_operation.status == "queued"
+        assert queue_item is not None and queue_item.status == "pending"
+        assert queue_item.next_retry_at is None
+        assert queue_item.payload == {"credential_id": credential_id, "_force_quota_probe": True}
+
+
+def test_manual_verify_new_waiting_operation_forces_quota_probe(api_harness: ApiHarness) -> None:
+    credential_id = str(uuid.uuid4())
+    retry_at = datetime.now(UTC) + timedelta(hours=1)
+    with api_harness.sessions.begin() as db:
+        db.add(
+            YuqueCredential(
+                id=credential_id,
+                name="new-quota-check",
+                base_url="https://www.yuque.com",
+                encrypted_token=b"encrypted-test-token",
+                token_nonce=b"n" * 12,
+                token_suffix="test",
+                subject_type="user",
+                subject_id="quota-subject",
+                status="waiting_quota",
+                verification_valid=True,
+                enabled=True,
+                next_retry_at=retry_at,
+            )
+        )
+
+    response = api_harness.client.post(
+        f"/api/v1/credentials/{credential_id}/verify",
+        headers=api_harness.csrf_headers,
+    )
+
+    assert response.status_code == 202
+    operation_id = response.json()["id"]
+    with api_harness.sessions() as db:
+        stored_credential = db.get(YuqueCredential, credential_id)
+        queue_item = db.scalar(select(QueueItem).where(QueueItem.operation_id == operation_id))
+        assert stored_credential is not None and stored_credential.status == "waiting_quota"
+        assert stored_credential.next_retry_at == retry_at.replace(tzinfo=None)
+        assert queue_item is not None and queue_item.status == "pending"
+        assert queue_item.payload == {"credential_id": credential_id, "_force_quota_probe": True}
+
+
 @pytest.mark.parametrize("mutation", ["disable", "delete", "token", "base_url"])
 def test_credential_mutations_terminalize_cancelled_backup_work(
     api_harness: ApiHarness,
@@ -756,6 +852,112 @@ def test_backup_job_list_rejects_inverted_created_range(api_harness: ApiHarness)
     ]
 
 
+def test_backup_job_progress_is_exposed_as_percentage(api_harness: ApiHarness) -> None:
+    job_id = str(uuid.uuid4())
+    with api_harness.sessions.begin() as db:
+        db.add(
+            BackupJob(
+                id=job_id,
+                trigger="manual",
+                scope={"type": "all"},
+                status="running",
+                progress=0.5,
+                active_slot=1,
+                pending_slot=None,
+            )
+        )
+
+    response = api_harness.client.get(f"/api/v1/backup-jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["progress"] == 50.0
+
+
+def test_backup_subtask_exposes_current_document_resource_activity(
+    api_harness: ApiHarness,
+) -> None:
+    repository_ids, credential_ids = _seed_repository_credentials(api_harness)
+    job_id = str(uuid.uuid4())
+    subtask_id = str(uuid.uuid4())
+    document_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    with api_harness.sessions.begin() as db:
+        db.add(
+            BackupJob(
+                id=job_id,
+                trigger="manual",
+                scope={"type": "repository", "repository_id": repository_ids[0]},
+                status="running",
+                active_slot=1,
+            )
+        )
+        db.add(
+            BackupSubtask(
+                id=subtask_id,
+                job_id=job_id,
+                credential_id=credential_ids[0],
+                repository_id=repository_ids[0],
+                status="running",
+                document_total=3,
+            )
+        )
+        db.add(
+            Document(
+                id=document_id,
+                repository_id=repository_ids[0],
+                yuque_doc_id="active-document",
+                title="Active document",
+                type="Doc",
+                path="/active-document",
+                original_path="/active-document",
+            )
+        )
+        db.add(
+            QueueItem(
+                category="document_sync",
+                status="running",
+                lease_owner="worker-test",
+                lease_until=now + timedelta(minutes=5),
+                idempotency_key=f"job:{job_id}:document:{document_id}",
+                payload={
+                    "_activity": {
+                        "stage": "resource_retry",
+                        "document_title": "Active document",
+                        "resource_name": "diagram.png",
+                        "resource_completed": 1,
+                        "resource_total": 3,
+                        "attempt": 2,
+                        "max_attempts": 4,
+                        "retry_in_seconds": 10,
+                        "last_error_code": "RESOURCE_NETWORK_ERROR",
+                        "updated_at": now.isoformat(),
+                    }
+                },
+                job_id=job_id,
+                subtask_id=subtask_id,
+                credential_id=credential_ids[0],
+                repository_id=repository_ids[0],
+                document_id=document_id,
+            )
+        )
+
+    response = api_harness.client.get(f"/api/v1/backup-jobs/{job_id}/subtasks")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["items"][0]["activity"] == {
+        "stage": "resource_retry",
+        "document_title": "Active document",
+        "resource_name": "diagram.png",
+        "resource_completed": 1,
+        "resource_total": 3,
+        "attempt": 2,
+        "max_attempts": 4,
+        "retry_in_seconds": 10,
+        "last_error_code": "RESOURCE_NETWORK_ERROR",
+        "updated_at": now.isoformat().replace("+00:00", "Z"),
+    }
+
+
 def test_backup_job_repository_filter_includes_scope_targets_and_persisted_subtasks(
     api_harness: ApiHarness,
 ) -> None:
@@ -952,6 +1154,85 @@ def test_backup_job_idempotency_merges_into_one_pending_slot_beside_active_job(
         )
         triggers = db.scalars(select(JobTrigger).order_by(JobTrigger.created_at.asc())).all()
         assert [trigger.status for trigger in triggers] == ["accepted", "merged"]
+
+
+def test_backup_job_estimate_and_selected_repository_quota_gate(
+    api_harness: ApiHarness,
+) -> None:
+    repository_ids, credential_ids = _seed_repository_credentials(
+        api_harness,
+        repository_count=2,
+    )
+    observed_at = datetime.now(UTC)
+    with api_harness.sessions.begin() as db:
+        credential = db.get(YuqueCredential, credential_ids[0])
+        first_repository = db.get(Repository, repository_ids[0])
+        second_repository = db.get(Repository, repository_ids[1])
+        assert credential is not None and first_repository is not None and second_repository is not None
+        credential.rate_limit_limit = 5000
+        credential.rate_limit_remaining = 4
+        credential.rate_limit_observed_at = observed_at
+        first_repository.safe_watermark = observed_at
+        second_repository.safe_watermark = observed_at
+        db.add_all(
+            [
+                Document(
+                    repository_id=first_repository.id,
+                    yuque_doc_id=f"estimate-doc-{index}",
+                    type="Doc",
+                    title=f"Estimate {index}",
+                    path=f"/estimate/{index}",
+                    original_path=f"/estimate/{index}",
+                )
+                for index in range(2)
+            ]
+        )
+
+    scope = {
+        "type": "repositories",
+        "credential_id": credential_ids[0],
+        "repository_ids": repository_ids,
+    }
+    estimate = api_harness.client.post(
+        "/api/v1/backup-jobs/estimate",
+        headers=api_harness.csrf_headers,
+        json={"scope": scope},
+    )
+    assert estimate.status_code == 200, estimate.text
+    payload = estimate.json()
+    assert payload["is_precise"] is False
+    assert payload["repository_count"] == 2
+    assert payload["document_count"] == 2
+    assert payload["estimated_api_calls"] == 10
+    assert payload["credentials"][0]["rate_limit_remaining"] == 4
+    assert payload["credentials"][0]["snapshot_fresh"] is True
+    assert payload["credentials"][0]["sufficient"] is False
+
+    blocked = api_harness.client.post(
+        "/api/v1/backup-jobs",
+        headers={**api_harness.csrf_headers, "Idempotency-Key": str(uuid.uuid4())},
+        json={"scope": scope},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "RATE_LIMIT_INSUFFICIENT"
+
+    with api_harness.sessions.begin() as db:
+        credential = db.get(YuqueCredential, credential_ids[0])
+        assert credential is not None
+        credential.rate_limit_remaining = 100
+
+    accepted_scope = {**scope, "repository_ids": [repository_ids[0]]}
+    accepted = api_harness.client.post(
+        "/api/v1/backup-jobs",
+        headers={**api_harness.csrf_headers, "Idempotency-Key": str(uuid.uuid4())},
+        json={"scope": accepted_scope},
+    )
+    assert accepted.status_code == 202, accepted.text
+    assert accepted.json()["job"]["scope"] == accepted_scope
+    with api_harness.sessions() as db:
+        job = db.get(BackupJob, accepted.json()["job"]["id"])
+        assert job is not None
+        assert job.scope["_target_repository_ids"] == [repository_ids[0]]
 
 
 def test_asset_download_enforces_auth_range_gone_not_found_and_path_boundary(

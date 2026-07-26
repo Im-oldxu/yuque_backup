@@ -4,7 +4,7 @@ x-backend: &backend
   build:
     context: ..
     dockerfile: deploy/Dockerfile.backend
-  image: yuque-backup-backend:1.0.0
+  image: yuque-backup-backend:1.1.0
   environment: &backend-environment
     APP_MASTER_KEY: ${APP_MASTER_KEY:?APP_MASTER_KEY is required}
     APP_ENV: ${APP_ENV:-development}

@@ -5,13 +5,12 @@ import {
   Field, FieldDescription, FieldGroup, FieldLabel, Input,
   Switch, Tabs, TabsContent, TabsList, TabsTrigger, toast,
 } from '@/components/ui'
-import { CalendarClock, Database, KeyRound, Save, ShieldCheck } from 'lucide-vue-next'
-import { api, ApiError, type RetentionSetting, type ScheduleSetting, type StorageSetting } from '@/api'
+import { Database, KeyRound, Save, ShieldCheck } from 'lucide-vue-next'
+import { api, ApiError, type RetentionSetting, type StorageSetting } from '@/api'
 import AsyncState from '@/components/AsyncState.vue'
 import PageHeader from '@/components/PageHeader.vue'
-import { formatBytes, formatDateTime } from '@/utils/format'
+import { formatBytes } from '@/utils/format'
 
-const schedule = ref<ScheduleSetting | null>(null)
 const retention = ref<RetentionSetting | null>(null)
 const storage = ref<StorageSetting | null>(null)
 const loading = ref(true)
@@ -23,21 +22,12 @@ const maxAssetMb = ref(500)
 async function load() {
   loading.value = true
   try {
-    const [scheduleValue, retentionValue, storageValue] = await Promise.all([api.getSchedule(), api.getRetention(), api.getStorage()])
-    schedule.value = scheduleValue; retention.value = retentionValue; storage.value = storageValue
+    const [retentionValue, storageValue] = await Promise.all([api.getRetention(), api.getStorage()])
+    retention.value = retentionValue; storage.value = storageValue
     maxAssetMb.value = storageValue.max_asset_size_bytes ? Math.round(storageValue.max_asset_size_bytes / 1024 / 1024) : 500
     error.value = ''
   } catch (cause) { error.value = cause instanceof ApiError ? cause.message : '设置加载失败。' }
   finally { loading.value = false }
-}
-
-async function saveSchedule() {
-  if (!schedule.value) return
-  if (schedule.value.cron.trim().split(/\s+/).length !== 5) { toast.error('Cron 必须是标准五段表达式。'); return }
-  saving.value = 'schedule'
-  try { schedule.value = await api.updateSchedule(schedule.value.cron.trim(), schedule.value.timezone); toast.success('调度设置已保存。') }
-  catch (cause) { toast.error(cause instanceof ApiError ? cause.message : '调度设置保存失败。') }
-  finally { saving.value = '' }
 }
 
 async function saveRetention() {
@@ -71,16 +61,10 @@ onMounted(load)
 
 <template>
   <div class="yb-page">
-    <PageHeader title="设置" description="管理全局调度、保留策略、资源上限和本地管理员密码。" />
+    <PageHeader title="设置" description="管理保留策略、资源上限和本地管理员密码。" />
     <AsyncState :loading="loading" :error="error" @retry="load">
-      <Tabs default-value="schedule">
-        <TabsList class="grid w-full grid-cols-4 lg:w-[520px]"><TabsTrigger value="schedule"><CalendarClock />调度</TabsTrigger><TabsTrigger value="retention"><ShieldCheck />保留</TabsTrigger><TabsTrigger value="storage"><Database />存储</TabsTrigger><TabsTrigger value="account"><KeyRound />账户</TabsTrigger></TabsList>
-
-        <TabsContent value="schedule" class="mt-4">
-          <Card v-if="schedule" class="max-w-3xl"><CardHeader><CardTitle class="text-base">Cron 与时区</CardTitle><CardDescription>保存前校验标准五段 Cron，并显示后三次计划时间。</CardDescription></CardHeader><CardContent>
-            <form @submit.prevent="saveSchedule"><FieldGroup><Field><FieldLabel for="cron">Cron 表达式</FieldLabel><Input id="cron" v-model="schedule.cron" class="font-mono" required /><FieldDescription>默认每天 02:00：0 2 * * *</FieldDescription></Field><Field><FieldLabel for="timezone">业务时区</FieldLabel><Input id="timezone" v-model="schedule.timezone" placeholder="Asia/Shanghai" autocomplete="off" required /><FieldDescription>填写有效的 IANA 时区名称，例如 Asia/Shanghai 或 UTC。</FieldDescription></Field><div><p class="mb-2 text-sm font-medium">后续运行时间</p><ol class="flex flex-col gap-1 text-sm text-muted-foreground"><li v-for="item in schedule.next_runs" :key="item">{{ formatDateTime(item, schedule.timezone) }}</li></ol></div><Button type="submit" class="w-fit" :disabled="saving === 'schedule'"><Save data-icon="inline-start" />{{ saving === 'schedule' ? '保存中' : '保存调度' }}</Button></FieldGroup></form>
-          </CardContent></Card>
-        </TabsContent>
+      <Tabs default-value="retention">
+        <TabsList class="grid w-full grid-cols-3 lg:w-[420px]"><TabsTrigger value="retention"><ShieldCheck />保留</TabsTrigger><TabsTrigger value="storage"><Database />存储</TabsTrigger><TabsTrigger value="account"><KeyRound />账户</TabsTrigger></TabsList>
 
         <TabsContent value="retention" class="mt-4">
           <Card v-if="retention" class="max-w-3xl"><CardHeader><CardTitle class="text-base">版本保留</CardTitle><CardDescription>活动文档的最新成功版本始终受保护；墓碑永久保留。</CardDescription></CardHeader><CardContent><form @submit.prevent="saveRetention"><FieldGroup><Field><FieldLabel for="retention-days">保留天数</FieldLabel><Input id="retention-days" v-model="retention.retention_days" type="number" min="1" step="1" required /><FieldDescription>历史版本按本地完成时间计算；删除文档按语雀 deleted_at 计算。</FieldDescription></Field><Button type="submit" class="w-fit" :disabled="saving === 'retention'"><Save data-icon="inline-start" />{{ saving === 'retention' ? '保存中' : '保存保留策略' }}</Button></FieldGroup></form></CardContent></Card>

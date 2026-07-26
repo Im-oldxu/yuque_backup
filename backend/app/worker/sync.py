@@ -49,14 +49,15 @@ from app.modules.preview import (
     ResourceCandidate,
     build_document_preview,
     extract_resource_candidates,
+    is_explicit_attachment_url,
 )
 from app.storage import AssetDownloader, ContentStore, ResourceDownloadError, normalized_content_hash
 from app.worker.coordinator import aggregate_job_in_session
 from app.worker.queue import (
-    QUOTA_MAX_DELAY_SECONDS,
     PersistentQueue,
     QueueItemSnapshot,
     QueueLeaseLost,
+    next_quota_retry_at,
     transient_retry_delay,
 )
 
@@ -343,6 +344,11 @@ class SyncExecutor:
                 )
                 return None
 
+            payload = dict(queue_item.payload)
+            force_quota_probe = bool(payload.pop("_force_quota_probe", False))
+            if force_quota_probe:
+                queue_item.payload = payload
+
             if credential.subject_id and credential.subject_type != "unknown":
                 bucket = session.scalar(
                     select(RateLimitBucket).where(
@@ -352,6 +358,8 @@ class SyncExecutor:
                     )
                 )
                 if (
+                    not force_quota_probe
+                    and
                     bucket is not None
                     and bucket.next_allowed_at is not None
                     and _ensure_utc(bucket.next_allowed_at) > current
@@ -452,21 +460,34 @@ class SyncExecutor:
             if records is None:
                 return
             queue_item, credential, operation = records
-            if rate_limit is not None:
-                self._persist_rate_in_session(session, credential, rate_limit, current=current)
+            bucket = self._persist_rate_in_session(
+                session,
+                credential,
+                rate_limit,
+                current=current,
+            ) if rate_limit is not None else None
             if kind == "quota":
                 payload = dict(queue_item.payload)
-                quota_attempt = int(payload.get("_quota_attempt", 0)) + 1
-                payload["_quota_attempt"] = quota_attempt
-                fallback = min(60 * (2 ** (quota_attempt - 1)), QUOTA_MAX_DELAY_SECONDS)
-                delay = retry_after_seconds if retry_after_seconds is not None else fallback
-                next_retry_at = current + timedelta(seconds=max(0, delay))
+                payload.pop("_quota_attempt", None)
+                next_retry_at = next_quota_retry_at(
+                    current,
+                    timezone_name=self._settings.tz,
+                    retry_after_seconds=retry_after_seconds,
+                )
+                bucket = bucket or self._rate_bucket(session, credential)
+                if bucket is not None and (
+                    bucket.next_allowed_at is None
+                    or _ensure_utc(bucket.next_allowed_at) < next_retry_at
+                ):
+                    bucket.next_allowed_at = next_retry_at
                 queue_item.payload = payload
                 queue_item.status = "retry_wait"
                 queue_item.available_at = next_retry_at
                 queue_item.next_retry_at = next_retry_at
                 queue_item.last_error_code = code[:64]
-                queue_item.last_error_message = "Waiting for Yuque API quota"
+                queue_item.last_error_message = (
+                    "Waiting for the next daily Yuque API quota window"
+                )
                 queue_item.lease_owner = None
                 queue_item.lease_until = None
                 credential.status = "waiting_quota"
@@ -743,6 +764,12 @@ class SyncExecutor:
         if self._defer_for_rate_limit(item, worker_id, credential):
             return
         self._queue.record_attempt(item.id, worker_id)
+        self._set_document_activity(
+            item,
+            worker_id,
+            stage="document_fetch",
+            document_title=document.title,
+        )
         client = self._client(credential)
         response = await client.get_document(document.yuque_doc_id, page=1, page_size=200)
         data = payload_object(response)
@@ -760,20 +787,72 @@ class SyncExecutor:
         self._persist_rate(credential.id, rate_limit)
 
         candidates = extract_resource_candidates(data)
+        resource_completed = 0
+        self._set_document_activity(
+            item,
+            worker_id,
+            stage="resource_download",
+            document_title=document.title,
+            resource_completed=resource_completed,
+            resource_total=len(candidates),
+        )
         with self._session_factory() as session:
             max_asset_size = session.scalar(select(AppSetting.max_asset_size_bytes).where(AppSetting.id == 1))
         token = self._token_resolver(credential)
-        outcomes = await asyncio.gather(
-            *(
+        def report_resource(
+            candidate: ResourceCandidate,
+            attempt: int,
+            stage: str,
+            retry_in_seconds: int | None,
+            last_error_code: str | None,
+        ) -> None:
+            self._set_document_activity(
+                item,
+                worker_id,
+                stage=stage,
+                document_title=document.title,
+                resource_name=candidate.name,
+                resource_completed=resource_completed,
+                resource_total=len(candidates),
+                attempt=attempt,
+                max_attempts=4,
+                retry_in_seconds=retry_in_seconds,
+                last_error_code=last_error_code,
+            )
+
+        tasks = [
+            asyncio.create_task(
                 self._download_asset(
                     candidate,
                     job_id=item.job_id or "operation",
                     max_bytes=max_asset_size,
                     token=token,
                     token_origin=repository.normalized_base_url,
+                    progress=report_resource,
                 )
-                for candidate in candidates
             )
+            for candidate in candidates
+        ]
+        outcomes: list[AssetOutcome] = []
+        for task in asyncio.as_completed(tasks):
+            outcome = await task
+            outcomes.append(outcome)
+            resource_completed += 1
+            report_resource(
+                outcome.candidate,
+                outcome.attempts,
+                "resource_download",
+                None,
+                outcome.issue_code,
+            )
+        outcomes.sort(key=lambda outcome: outcome.candidate.position)
+        self._set_document_activity(
+            item,
+            worker_id,
+            stage="document_commit",
+            document_title=document.title,
+            resource_completed=resource_completed,
+            resource_total=len(candidates),
         )
         self._persist_assets(outcomes)
         resource_map = {
@@ -897,6 +976,8 @@ class SyncExecutor:
         max_bytes: int | None,
         token: str,
         token_origin: str,
+        progress: Callable[[ResourceCandidate, int, str, int | None, str | None], None]
+        | None = None,
     ) -> AssetOutcome:
         if (
             max_bytes is not None
@@ -911,6 +992,8 @@ class SyncExecutor:
             )
         async with self._asset_semaphore:
             for attempt in range(1, 5):
+                if progress is not None:
+                    progress(candidate, attempt, "resource_download", None, None)
                 try:
                     downloaded = await self._asset_downloader.download(
                         candidate.original_url,
@@ -935,7 +1018,16 @@ class SyncExecutor:
                     )
                 except ResourceDownloadError as exc:
                     if exc.transient and attempt < 4:
-                        await self._sleep((2, 10, 30)[attempt - 1])
+                        retry_delay = (2, 10, 30)[attempt - 1]
+                        if progress is not None:
+                            progress(
+                                candidate,
+                                attempt,
+                                "resource_retry",
+                                retry_delay,
+                                exc.code,
+                            )
+                        await self._sleep(retry_delay)
                         continue
                     return AssetOutcome(
                         candidate=candidate,
@@ -946,6 +1038,38 @@ class SyncExecutor:
                         attempts=attempt,
                     )
         raise AssertionError("resource retry loop exited unexpectedly")
+
+    def _set_document_activity(
+        self,
+        item: QueueItemSnapshot,
+        worker_id: str,
+        *,
+        stage: str,
+        document_title: str,
+        resource_name: str | None = None,
+        resource_completed: int = 0,
+        resource_total: int = 0,
+        attempt: int | None = None,
+        max_attempts: int | None = None,
+        retry_in_seconds: int | None = None,
+        last_error_code: str | None = None,
+    ) -> None:
+        self._queue.set_activity(
+            item.id,
+            worker_id,
+            {
+                "stage": stage,
+                "document_title": document_title,
+                "resource_name": resource_name,
+                "resource_completed": resource_completed,
+                "resource_total": resource_total,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "retry_in_seconds": retry_in_seconds,
+                "last_error_code": last_error_code,
+                "updated_at": _iso(self._now()),
+            },
+        )
 
     def _persist_assets(self, outcomes: list[AssetOutcome]) -> None:
         with self._session_factory.begin() as session:
@@ -1279,9 +1403,21 @@ class SyncExecutor:
                 )
                 latest_remote = _optional_str(summary.get("latest_version_id"))
                 remote_changed = False
-                if document and document.latest_successful_version_id and latest_remote:
+                latest = None
+                if document and document.latest_successful_version_id:
                     latest = session.get(DocumentVersion, document.latest_successful_version_id)
-                    remote_changed = latest is None or latest.remote_version_id != latest_remote
+                    if latest_remote:
+                        remote_changed = latest is None or latest.remote_version_id != latest_remote
+                needs_repair = False
+                if latest is not None:
+                    latest_assets = list(
+                        session.scalars(
+                            select(VersionAsset).where(VersionAsset.version_id == latest.id)
+                        )
+                    )
+                    needs_repair = _has_malformed_duplicate_resource(
+                        latest_assets
+                    ) or _has_legacy_non_attachment_resource(latest_assets)
                 summary_updated_at = _parse_datetime(
                     summary.get("updated_at") or summary.get("content_updated_at")
                 )
@@ -1316,7 +1452,14 @@ class SyncExecutor:
                     document.path = path
                     document.original_path = path
                     document.toc_item_id = toc.id if toc else None
-                if missing or metadata_changed or remote_changed or remote_timestamp_changed or restored:
+                if (
+                    missing
+                    or metadata_changed
+                    or remote_changed
+                    or remote_timestamp_changed
+                    or restored
+                    or needs_repair
+                ):
                     specs.append((document.id, summary))
             subtask.document_total += len(specs)
         return specs
@@ -1574,8 +1717,6 @@ class SyncExecutor:
         worker_id: str,
         error: YuqueQuotaError,
     ) -> None:
-        if item.credential_id and error.rate_limit:
-            self._persist_rate(item.credential_id, error.rate_limit)
         next_retry = self._queue.retry_quota(
             item.id,
             worker_id,
@@ -1585,6 +1726,17 @@ class SyncExecutor:
             if item.credential_id:
                 credential = session.get(YuqueCredential, item.credential_id)
                 if credential:
+                    bucket = self._persist_rate_in_session(
+                        session,
+                        credential,
+                        error.rate_limit,
+                        current=self._now(),
+                    ) if error.rate_limit else self._rate_bucket(session, credential)
+                    if bucket is not None and (
+                        bucket.next_allowed_at is None
+                        or _ensure_utc(bucket.next_allowed_at) < next_retry
+                    ):
+                        bucket.next_allowed_at = next_retry
                     credential.status = "waiting_quota"
                     credential.next_retry_at = next_retry
                     credential.pause_reason = "quota"
@@ -1888,36 +2040,54 @@ class SyncExecutor:
         snapshot: RateLimitSnapshot,
         *,
         current: datetime,
-    ) -> None:
+    ) -> RateLimitBucket | None:
         credential.rate_limit_limit = snapshot.limit
         credential.rate_limit_remaining = snapshot.remaining
         credential.rate_limit_observed_at = snapshot.observed_at
-        if credential.status == "waiting_quota" and (
+        quota_retry_at = None
+        if snapshot.remaining == 0:
+            quota_retry_at = next_quota_retry_at(
+                current,
+                timezone_name=self._settings.tz,
+            )
+            credential.status = "waiting_quota"
+            credential.next_retry_at = quota_retry_at
+            credential.pause_reason = "quota"
+        elif credential.status == "waiting_quota" and (
             snapshot.remaining is None or snapshot.remaining > 0
         ):
             credential.status = "valid"
             credential.next_retry_at = None
             credential.pause_reason = None
-        if credential.subject_id and credential.subject_type != "unknown":
-            bucket = session.scalar(
-                select(RateLimitBucket).where(
-                    RateLimitBucket.base_url == credential.base_url,
-                    RateLimitBucket.subject_type == credential.subject_type,
-                    RateLimitBucket.subject_id == credential.subject_id,
-                )
-            )
-            if bucket is None:
-                bucket = RateLimitBucket(
-                    base_url=credential.base_url,
-                    subject_type=credential.subject_type,
-                    subject_id=credential.subject_id,
-                )
-                session.add(bucket)
+        bucket = self._rate_bucket(session, credential)
+        if bucket is not None:
             bucket.rate_limit_limit = snapshot.limit
             bucket.rate_limit_remaining = snapshot.remaining
             bucket.observed_at = snapshot.observed_at
-            delay = 60.0 if snapshot.remaining == 0 else self._settings.yuque_request_interval_seconds
-            bucket.next_allowed_at = current + timedelta(seconds=delay)
+            bucket.next_allowed_at = quota_retry_at or (
+                current + timedelta(seconds=self._settings.yuque_request_interval_seconds)
+            )
+        return bucket
+
+    @staticmethod
+    def _rate_bucket(session: Session, credential: YuqueCredential) -> RateLimitBucket | None:
+        if not credential.subject_id or credential.subject_type == "unknown":
+            return None
+        bucket = session.scalar(
+            select(RateLimitBucket).where(
+                RateLimitBucket.base_url == credential.base_url,
+                RateLimitBucket.subject_type == credential.subject_type,
+                RateLimitBucket.subject_id == credential.subject_id,
+            )
+        )
+        if bucket is None:
+            bucket = RateLimitBucket(
+                base_url=credential.base_url,
+                subject_type=credential.subject_type,
+                subject_id=credential.subject_id,
+            )
+            session.add(bucket)
+        return bucket
 
     def _defer_for_rate_limit(
         self,
@@ -1941,6 +2111,22 @@ class SyncExecutor:
             if next_allowed <= self._now():
                 return False
         self._queue.continue_with_payload(item.id, worker_id, item.payload, available_at=next_allowed)
+        with self._session_factory.begin() as session:
+            stored_credential = session.get(YuqueCredential, item.credential_id)
+            if stored_credential is not None:
+                stored_credential.status = "waiting_quota"
+                stored_credential.next_retry_at = next_allowed
+                stored_credential.pause_reason = "quota"
+            if item.operation_id:
+                operation = session.get(Operation, item.operation_id)
+                if operation is not None:
+                    operation.status = "waiting_quota"
+                    operation.next_retry_at = next_allowed
+            if item.subtask_id:
+                subtask = session.get(BackupSubtask, item.subtask_id)
+                if subtask is not None:
+                    subtask.status = "waiting_quota"
+                    subtask.next_retry_at = next_allowed
         return True
 
     def _start_operation(self, operation_id: str | None) -> None:
@@ -2051,6 +2237,27 @@ def _optional_str(value: Any) -> str | None:
         return None
     result = str(value).strip()
     return result or None
+
+
+def _has_malformed_duplicate_resource(assets: list[VersionAsset]) -> bool:
+    urls = {asset.original_url for asset in assets}
+    return any(
+        asset.status != "downloaded"
+        and asset.original_url[-1:] in {")", "]", "}"}
+        and asset.original_url[:-1] in urls
+        for asset in assets
+    )
+
+
+def _has_legacy_non_attachment_resource(assets: list[VersionAsset]) -> bool:
+    return any(
+        asset.type != "attachment"
+        or (
+            not is_explicit_attachment_url(asset.original_url)
+            and not (asset.source_location or "").lower().endswith(".attachment_url")
+        )
+        for asset in assets
+    )
 
 
 def _redact_text(value: str, secret: str) -> str:

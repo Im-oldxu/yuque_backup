@@ -15,7 +15,7 @@ from app.core.models import (
     WorkerHeartbeat,
     YuqueCredential,
 )
-from app.modules.backups.service import public_scope
+from app.modules.backups.service import public_progress, public_scope
 from app.modules.dashboard.schemas import (
     DashboardJobCountsResponse,
     DashboardJobResponse,
@@ -41,7 +41,7 @@ def _job_response(job: BackupJob) -> DashboardJobResponse:
         trigger=job.trigger,
         scope=public_scope(job.scope),
         status=job.status,
-        progress=job.progress,
+        progress=public_progress(job.progress),
         document_total=job.document_total,
         document_succeeded=job.document_succeeded,
         document_partial=job.document_partial,

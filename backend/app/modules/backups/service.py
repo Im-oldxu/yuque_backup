@@ -3,10 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -15,18 +15,23 @@ from app.core.errors import AppError
 from app.core.models import (
     BackupJob,
     BackupSubtask,
+    Document,
     IdempotencyRecord,
     JobTrigger,
+    QueueItem,
     Repository,
     RepositoryCredential,
     YuqueCredential,
     utcnow,
 )
 from app.modules.backups.schemas import (
+    BackupActivityResponse,
     BackupJobResponse,
     BackupSubtaskResponse,
     CredentialPick,
     JobAccepted,
+    QuotaEstimateCredential,
+    QuotaEstimateResponse,
     RepositoryPick,
 )
 
@@ -38,13 +43,17 @@ def public_scope(scope: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in scope.items() if not key.startswith("_")}
 
 
+def public_progress(progress: float) -> float:
+    return max(0.0, min(100.0, progress * 100))
+
+
 def serialize_job(job: BackupJob) -> BackupJobResponse:
     return BackupJobResponse(
         id=job.id,
         trigger=job.trigger,
         scope=public_scope(job.scope),
         status=job.status,
-        progress=max(0.0, min(1.0, job.progress)),
+        progress=public_progress(job.progress),
         status_reason=job.status_reason,
         document_total=job.document_total,
         document_succeeded=job.document_succeeded,
@@ -82,7 +91,58 @@ def serialize_subtask(db: Session, subtask: BackupSubtask) -> BackupSubtaskRespo
         issue_count=subtask.issue_count,
         next_retry_at=utc_datetime(subtask.next_retry_at),
         last_issue=subtask.last_issue,
+        activity=_serialize_subtask_activity(db, subtask),
         created_at=utc_datetime(subtask.created_at),
+    )
+
+
+def _serialize_subtask_activity(
+    db: Session,
+    subtask: BackupSubtask,
+) -> BackupActivityResponse | None:
+    active_items = list(
+        db.scalars(
+            select(QueueItem)
+            .where(
+                QueueItem.subtask_id == subtask.id,
+                QueueItem.status.in_(("pending", "running", "retry_wait")),
+            )
+            .order_by(QueueItem.updated_at.desc(), QueueItem.created_at.desc())
+        )
+    )
+    if not active_items:
+        return None
+    item = min(
+        active_items,
+        key=lambda candidate: {
+            "running": 0,
+            "retry_wait": 1,
+            "pending": 2,
+        }.get(candidate.status, 3),
+    )
+    payload_activity = item.payload.get("_activity")
+    if isinstance(payload_activity, dict):
+        return BackupActivityResponse.model_validate(payload_activity)
+    if item.status == "retry_wait":
+        stage = "waiting_retry"
+    elif item.category == "document_sync":
+        stage = "document_fetch" if item.status == "running" else "queued"
+    elif item.status == "pending":
+        stage = "queued"
+    else:
+        stage = {
+            "metadata": "repository_metadata",
+            "toc": "repository_toc",
+            "documents": "repository_documents",
+            "deleted_documents": "repository_deletions",
+            "barrier": "document_commit",
+        }.get(str(item.payload.get("stage", "metadata")), "repository_metadata")
+    document = db.get(Document, item.document_id) if item.document_id else None
+    return BackupActivityResponse(
+        stage=stage,
+        document_title=document.title if document else None,
+        attempt=item.attempt_count or None,
+        updated_at=utc_datetime(item.updated_at),
     )
 
 
@@ -141,9 +201,37 @@ def resolve_targets(db: Session, scope: dict[str, Any]) -> list[str]:
         if relation is None:
             raise AppError(409, "PRIMARY_CREDENTIAL_REQUIRED", "知识库需要指定主凭据")
         statement = statement.where(Repository.id == repository.id)
+    elif scope_type == "repositories":
+        credential_id = str(scope.get("credential_id"))
+        repository_ids = sorted({str(value) for value in scope.get("repository_ids", [])})
+        credential = db.scalar(
+            select(YuqueCredential).where(
+                YuqueCredential.id == credential_id,
+                YuqueCredential.deleted_at.is_(None),
+            )
+        )
+        if credential is None:
+            raise AppError(404, "CREDENTIAL_NOT_FOUND", "语雀凭据不存在")
+        existing_ids = set(
+            db.scalars(select(Repository.id).where(Repository.id.in_(repository_ids))).all()
+        )
+        if existing_ids != set(repository_ids):
+            raise AppError(404, "REPOSITORY_NOT_FOUND", "知识库不存在")
+        statement = statement.where(
+            YuqueCredential.id == credential_id,
+            Repository.id.in_(repository_ids),
+        )
     else:
         raise AppError(422, "VALIDATION_ERROR", "任务范围不合法")
     targets = [row[0] for row in db.execute(statement).all()]
+    if scope_type == "repositories":
+        requested = {str(value) for value in scope.get("repository_ids", [])}
+        if set(targets) != requested:
+            raise AppError(
+                409,
+                "CREDENTIAL_CANNOT_ACCESS_REPOSITORY",
+                "所选凭据不是全部所选知识库的可用主凭据",
+            )
     if not targets:
         if scope_type == "all":
             selected_without_primary = db.scalar(
@@ -160,6 +248,118 @@ def resolve_targets(db: Session, scope: dict[str, Any]) -> list[str]:
                 raise AppError(409, "PRIMARY_CREDENTIAL_REQUIRED", "知识库需要指定主凭据")
         raise AppError(409, "NO_ENABLED_TARGETS", "没有可执行的已启用备份目标")
     return sorted(set(targets))
+
+
+def _target_rows(db: Session, repository_ids: list[str]) -> list[tuple[Repository, YuqueCredential]]:
+    statement = (
+        select(Repository, YuqueCredential)
+        .join(RepositoryCredential, RepositoryCredential.repository_id == Repository.id)
+        .join(YuqueCredential, YuqueCredential.id == RepositoryCredential.credential_id)
+        .where(
+            Repository.id.in_(repository_ids),
+            RepositoryCredential.is_primary.is_(True),
+            YuqueCredential.deleted_at.is_(None),
+        )
+        .order_by(YuqueCredential.name.asc(), Repository.name.asc(), Repository.id.asc())
+    )
+    return [(repository, credential) for repository, credential in db.execute(statement)]
+
+
+def _repository_api_call_estimate(document_count: int, *, initial: bool) -> int:
+    # Mirrors SyncExecutor: repository metadata, TOC, paged current list,
+    # optional deleted list, then one detail request per locally known document.
+    current_list_pages = max(1, (document_count + 99) // 100)
+    return 2 + current_list_pages + (0 if initial else 1) + document_count
+
+
+def estimate_scope_quota(
+    db: Session,
+    scope: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> QuotaEstimateResponse:
+    target_ids = resolve_targets(db, scope)
+    rows = _target_rows(db, target_ids)
+    counts = {
+        repository_id: int(count)
+        for repository_id, count in db.execute(
+            select(Document.repository_id, func.count(Document.id))
+            .where(Document.repository_id.in_(target_ids), Document.deleted_at.is_(None))
+            .group_by(Document.repository_id)
+        )
+    }
+    current = now or utcnow()
+    grouped: dict[str, dict[str, Any]] = {}
+    for repository, credential in rows:
+        document_count = counts.get(repository.id, 0)
+        entry = grouped.setdefault(
+            credential.id,
+            {
+                "credential": credential,
+                "repository_count": 0,
+                "document_count": 0,
+                "estimated_api_calls": 0,
+            },
+        )
+        entry["repository_count"] += 1
+        entry["document_count"] += document_count
+        entry["estimated_api_calls"] += _repository_api_call_estimate(
+            document_count,
+            initial=repository.safe_watermark is None,
+        )
+
+    credential_estimates: list[QuotaEstimateCredential] = []
+    for entry in grouped.values():
+        credential = entry["credential"]
+        observed_at = utc_datetime(credential.rate_limit_observed_at)
+        snapshot_fresh = bool(observed_at and observed_at >= current - timedelta(hours=1))
+        remaining = credential.rate_limit_remaining
+        sufficient = (
+            remaining >= entry["estimated_api_calls"]
+            if snapshot_fresh and remaining is not None
+            else None
+        )
+        credential_estimates.append(
+            QuotaEstimateCredential(
+                credential_id=credential.id,
+                credential_name=credential.name,
+                repository_count=entry["repository_count"],
+                document_count=entry["document_count"],
+                estimated_api_calls=entry["estimated_api_calls"],
+                rate_limit_limit=credential.rate_limit_limit,
+                rate_limit_remaining=remaining,
+                rate_limit_observed_at=observed_at,
+                snapshot_fresh=snapshot_fresh,
+                sufficient=sufficient,
+            )
+        )
+    return QuotaEstimateResponse(
+        repository_count=len(target_ids),
+        document_count=sum(item.document_count for item in credential_estimates),
+        estimated_api_calls=sum(item.estimated_api_calls for item in credential_estimates),
+        credentials=credential_estimates,
+        calculation_basis=[
+            "每个知识库包含详情与目录请求",
+            "文档列表按语雀官方每页最多 100 条估算",
+            "增量任务包含已删除文档列表请求",
+            "按本地已知文档数估算详情请求; 远端变化数和 Table 额外分页无法预先精确获知",
+        ],
+    )
+
+
+def ensure_quota_sufficient(estimate: QuotaEstimateResponse) -> None:
+    insufficient = [item for item in estimate.credentials if item.sufficient is False]
+    if not insufficient:
+        return
+    item = insufficient[0]
+    raise AppError(
+        409,
+        "RATE_LIMIT_INSUFFICIENT",
+        (
+            f"凭据“{item.credential_name}”最近一次语雀响应显示剩余额度 "
+            f"{item.rate_limit_remaining}, 低于本次预计 {item.estimated_api_calls} 次请求"
+        ),
+    )
 
 
 def merge_public_scope(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:

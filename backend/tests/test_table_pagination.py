@@ -171,7 +171,7 @@ async def _run_table_sync(
 
 
 @pytest.mark.asyncio
-async def test_table_pagination_persists_every_page_for_body_preview_and_assets(
+async def test_table_pagination_persists_every_page_without_downloading_image_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -192,8 +192,6 @@ async def test_table_pagination_persists_every_page_for_body_preview_and_assets(
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "assets.example":
-            return httpx.Response(200, content=b"late-image", headers={"Content-Type": "image/png"})
         assert request.url.path == "/api/v2/repos/docs/table-doc"
         page = int(request.url.params["page"])
         requested_pages.append(page)
@@ -216,18 +214,17 @@ async def test_table_pagination_persists_every_page_for_body_preview_and_assets(
             subtask = session.get(BackupSubtask, subtask_id)
             queue_item = session.get(QueueItem, queue_item_id)
             assert document is not None and version is not None
-            reference = session.scalar(
-                select(VersionAsset).where(VersionAsset.version_id == version.id)
+            references = list(
+                session.scalars(select(VersionAsset).where(VersionAsset.version_id == version.id))
             )
             assert document.latest_successful_version_id == version.id
             assert version.completeness == "complete"
             assert version.issue_count == 0
-            assert version.resource_total == 1
-            assert version.resource_downloaded == 1
+            assert version.resource_total == 0
+            assert version.resource_downloaded == 0
             assert subtask is not None and subtask.document_succeeded == 1
             assert queue_item is not None and queue_item.status == "succeeded"
-            assert reference is not None and reference.status == "downloaded"
-            assert reference.source_location == "body_table.records[1].file.src"
+            assert references == []
             assert version.raw_response_path is not None
             assert version.raw_body_path is not None
             assert version.preview_path is not None

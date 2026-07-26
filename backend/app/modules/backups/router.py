@@ -21,11 +21,14 @@ from app.modules.backups.schemas import (
     BackupSubtaskResponse,
     CreateJobRequest,
     JobAccepted,
+    QuotaEstimateResponse,
 )
 from app.modules.backups.service import (
     canonical_hash,
     commit_job_transaction,
     create_or_merge_job,
+    ensure_quota_sufficient,
+    estimate_scope_quota,
     get_job,
     replay_idempotency,
     save_idempotency,
@@ -37,6 +40,21 @@ from app.modules.documents.schemas import BackupIssueResponse
 from app.modules.documents.service import serialize_issue
 
 router = APIRouter(prefix="/api/v1/backup-jobs", tags=["backup-jobs"])
+
+
+@router.post(
+    "/estimate",
+    response_model=QuotaEstimateResponse,
+    status_code=200,
+    responses=documented_responses(401, 403, 404, 409, 422),
+    openapi_extra=CSRF_OPENAPI_EXTRA,
+)
+def estimate_backup_job(
+    payload: CreateJobRequest,
+    db: DbSession,
+    _admin: CsrfAdmin,
+) -> QuotaEstimateResponse:
+    return estimate_scope_quota(db, payload.scope.model_dump(mode="json"))
 
 
 @router.post(
@@ -69,6 +87,7 @@ def create_backup_job(
     )
     if replay is not None:
         return replay
+    ensure_quota_sufficient(estimate_scope_quota(db, scope))
     job, merged = create_or_merge_job(
         db,
         scope=scope,

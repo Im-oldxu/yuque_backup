@@ -1,9 +1,9 @@
 # Yuque-Backup MVP API 接口文档
 
-> 文档状态：已确认并完成实现，作为 v1.0.0 前后端契约\
-> 版本：v1.0.0\
+> 文档状态：已确认并完成实现，作为 v1.1.0 前后端契约\
+> 版本：v1.1.0\
 > 编写及官方文档核验日期：2026-07-23  
-> 实现与契约验收日期：2026-07-24\
+> 实现与契约验收日期：2026-07-26\
 > 输入依据：[需求文档.md](需求文档.md)、[技术方案文档.md](技术方案文档.md)  
 > 适用对象：Yuque-Backup 前端与后端开发人员
 
@@ -11,7 +11,7 @@
 
 本文只定义 MVP 所需的本地 Web API。语雀 OpenAPI 是 worker 的内部集成，不由前端直接调用，也不在本文重复定义。
 
-v1.0.0 后端 OpenAPI 共包含 46 条路径、52 个操作；前端真实 API 模式已经完成初始化、登录、会话、CSRF、仪表盘和 worker 心跳的浏览器联调。接口路径、字段和错误结构仍以本文契约为准。
+v1.1.0 后端 OpenAPI 共包含 47 条路径、53 个操作；前端真实 API 模式已经完成初始化、登录、会话、CSRF、仪表盘和 worker 心跳的浏览器联调。接口路径、字段和错误结构仍以本文契约为准。
 
 MVP API 覆盖：
 
@@ -19,7 +19,7 @@ MVP API 覆盖：
 - 语雀凭据新增、更新、验证、启停、删除和知识库发现；
 - 知识库选择、主凭据、目录树、文档搜索和浏览；
 - 文档版本、资源状态、安全预览和单项下载；
-- 手动备份、任务取消、重新执行、任务/子任务/问题查询；
+- 手动备份、备份额度预估、任务取消、重新执行、任务/子任务/问题查询；
 - 仪表盘、Cron/时区、保留期、资源上限和存储信息；
 - 删除墓碑查询；
 - 健康检查和异步操作查询。
@@ -156,7 +156,7 @@ API 使用稳定英文值，前端映射为中文展示文案，不直接显示�
 | 凭据主体 | `user`、`group`、`unknown` |
 | 文档类型 | `Doc`、`Sheet`、`Thread`、`Board`、`Table`、`HtmlDoc`、`unknown` |
 | 任务触发方式 | `manual`、`cron` |
-| 任务范围 | `all`、`credential`、`repository` |
+| 任务范围 | `all`、`credential`、`repository`、`repositories` |
 | 资源状态 | `pending`、`downloaded`、`skipped`、`failed` |
 | 问题级别 | `warning`、`error` |
 
@@ -457,12 +457,14 @@ API 进程不直接访问语雀；worker 从持久化队列执行验证。验证
 - 成功接收：`202 Operation`，`type=credential_verify`；
 - 错误：`404 CREDENTIAL_NOT_FOUND`、`409 OPERATION_ALREADY_RUNNING`。
 
+若该凭据已有 `waiting_quota` 的验证操作，再次调用本接口不会创建重复 Operation，而是立即唤醒原队列项执行一次额度探测。该探测只绕过一次本地等待窗口；若语雀仍返回 429，worker 会等待到本地时区的下一日再自动重试，当天不再自动探测。已有操作处于 `queued` 或 `running` 时仍返回 `409 OPERATION_ALREADY_RUNNING`。
+
 worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 
 | 语雀结果 | 凭据状态 | Operation |
 | --- | --- | --- |
 | 2xx | `valid` | `succeeded` |
-| 429 | `waiting_quota` | `waiting_quota`，自动续跑 |
+| 429 | `waiting_quota` | `waiting_quota`，下一日自动续跑 |
 | 401/403 | `action_required` | `failed` |
 | 域名/网络/5xx 重试耗尽 | `action_required` | `failed` |
 
@@ -683,8 +685,8 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 | `content_hash` | string | 规范化版本哈希 |
 | `completeness` | enum | 完整性 |
 | `is_latest` | boolean | 是否为最新可浏览版本 |
-| `resource_total` | integer | 计划资源数 |
-| `resource_downloaded` | integer | 已保存数 |
+| `resource_total` | integer | 计划下载的显式附件数 |
+| `resource_downloaded` | integer | 已保存的显式附件数 |
 | `issue_count` | integer | 问题数 |
 | `source_job_id` | UUID | 来源任务 |
 | `remote_updated_at` | datetime/null | 语雀时间 |
@@ -723,6 +725,8 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 
 安全 URL 仅在需要展示问题时返回，必须移除查询中的敏感参数；原始 URL 不返回前端。
 
+版本详情中的资源统计只包含文档明确标识的附件。Markdown 图片、HTML 图片、结构化 `src` 以及仅因路径带文件扩展名而看似文件的普通外部链接不计入资源统计，也不触发下载。
+
 ### 9.6 版本资源列表
 
 `GET /api/v1/documents/{document_id}/versions/{version_id}/assets`
@@ -733,6 +737,8 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 - 成功：`200`，分页资源引用；
 - 资源字段：`asset_id`、名称、资源类型、MIME、大小、状态、是否可内联、是否可下载和安全问题码；
 - 错误：`404 VERSION_NOT_FOUND`。
+
+该列表只返回文档明确标识的附件。Markdown/HTML 图片和普通外部文件链接保留在原始正文中，不作为版本资源返回。
 
 同一物理资源在不同版本中可以重复出现为不同引用，但下载仍通过全局 `asset_id` 去重。
 
@@ -756,7 +762,7 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 - 前端必须放入无 `allow-scripts`、无 `allow-same-origin` 的 sandbox iframe；
 - 错误：`404 VERSION_NOT_FOUND`、`409 PREVIEW_NOT_AVAILABLE`、`410 VERSION_CONTENT_PURGED`。
 
-该 HTML 只能引用本系统受控资源地址，不主动加载远程 URL。
+原始 Markdown 中的图片链接保持不变；安全预览不下载或加载这些远程图片。该 HTML 只能引用本系统受控资源地址，不主动加载远程 URL。
 
 ### 9.9 下载原始 API 响应
 
@@ -810,7 +816,7 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 
 - 权限：管理员会话 + CSRF；
 - Header：`Idempotency-Key` 必填；
-- 请求三选一：
+- 请求四选一：
 
 ```json
 { "scope": { "type": "all" } }
@@ -834,6 +840,16 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 }
 ```
 
+```json
+{
+  "scope": {
+    "type": "repositories",
+    "credential_id": "...",
+    "repository_ids": ["...", "..."]
+  }
+}
+```
+
 - 成功接收：`202`；返回 `job` 和 `merged`；
 
 ```json
@@ -851,11 +867,57 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 
 如果已有总任务运行，新触发合并到唯一排队任务；接口返回该排队任务且 `merged=true`。不同范围合并后，响应中的 scope 为规范化并集摘要。
 
-范围解释：`all` 只包含已启用凭据下已选中、且主凭据已确定的知识库；`credential` 只包含该凭据作为主凭据的已选知识库；`repository` 使用该知识库当前主凭据。备用凭据不会因手动任务自动消耗额度。
+范围解释：`all` 只包含已启用凭据下已选中、且主凭据已确定的知识库；`credential` 只包含该凭据作为主凭据的已选知识库；`repository` 使用该知识库当前主凭据；`repositories` 使用指定凭据备份明确列出的一个或多个知识库，且该凭据必须是这些知识库当前可用的主凭据。备用凭据不会因手动任务自动消耗额度。
 
-- 错误：`404 CREDENTIAL_NOT_FOUND`、`404 REPOSITORY_NOT_FOUND`、`409 NO_ENABLED_TARGETS`、`409 PRIMARY_CREDENTIAL_REQUIRED`、`409 IDEMPOTENCY_CONFLICT`。
+服务端在创建或合并手动任务前会按 10.2 节重新估算。最近一小时内实际语雀响应头记录的剩余额度小于预计请求数时，拒绝创建；缺少最近额度快照时仍允许排队，由 worker 持续读取真实响应头并处理 429。
 
-### 10.2 任务列表
+- 错误：`404 CREDENTIAL_NOT_FOUND`、`404 REPOSITORY_NOT_FOUND`、`409 NO_ENABLED_TARGETS`、`409 PRIMARY_CREDENTIAL_REQUIRED`、`409 CREDENTIAL_CANNOT_ACCESS_REPOSITORY`、`409 RATE_LIMIT_INSUFFICIENT`、`409 IDEMPOTENCY_CONFLICT`。
+
+### 10.2 备份额度预估
+
+`POST /api/v1/backup-jobs/estimate`
+
+- 权限：管理员会话 + CSRF；
+- 请求：与 10.1 节相同的 `scope`，不要求 `Idempotency-Key`；
+- 行为：只读取本地知识库、文档计数和凭据额度快照，不在 API 进程中请求语雀；
+- 成功：`200`。
+
+```json
+{
+  "repository_count": 2,
+  "document_count": 135,
+  "estimated_api_calls": 143,
+  "is_precise": false,
+  "credentials": [
+    {
+      "credential_id": "...",
+      "credential_name": "个人语雀",
+      "repository_count": 2,
+      "document_count": 135,
+      "estimated_api_calls": 143,
+      "rate_limit_limit": 5000,
+      "rate_limit_remaining": 4200,
+      "rate_limit_observed_at": "2026-07-24T10:00:00Z",
+      "snapshot_fresh": true,
+      "sufficient": true
+    }
+  ],
+  "calculation_basis": [
+    "每个知识库包含详情与目录请求",
+    "文档列表按语雀官方每页最多 100 条估算",
+    "增量任务包含已删除文档列表请求",
+    "按本地已知文档数估算详情请求; 远端变化数和 Table 额外分页无法预先精确获知"
+  ]
+}
+```
+
+`estimated_api_calls` 始终是预计值，`is_precise` 固定为 `false`。估算基于 worker 已确认的调用链、本地已知文档数、语雀文档列表每页最多 100 条和 Table 每页最多 200 行等官方限制；远端新增或变化文档、Table 额外分页、重试和并发产生的共享额度消耗无法在执行前精确获知。
+
+额度上限和剩余量只来自实际响应的 `X-RateLimit-Limit`、`X-RateLimit-Remaining` 快照。快照缺失或观测时间早于当前一小时，`snapshot_fresh=false` 且 `sufficient=null`；这一小时仅用于判断快照是否足够新。当前官方资料没有提供可依赖的 reset 响应头；`next_retry_at` 表示本项目按已确认日额度规则计算的次日重试时间，不宣称它是语雀接口返回的精确重置时间。
+
+- 错误：`404 CREDENTIAL_NOT_FOUND`、`404 REPOSITORY_NOT_FOUND`、`409 NO_ENABLED_TARGETS`、`409 PRIMARY_CREDENTIAL_REQUIRED`、`409 CREDENTIAL_CANNOT_ACCESS_REPOSITORY`。
+
+### 10.3 任务列表
 
 `GET /api/v1/backup-jobs`
 
@@ -864,9 +926,9 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 - 默认排序：`created_at DESC, id DESC`；
 - 成功：`200`，分页任务摘要。
 
-任务摘要至少包含：`id`、`trigger`、`scope`、`status`、`progress`、文档/资源计数、`created_at`、`started_at`、`finished_at`、`cancel_requested_at`。
+任务摘要至少包含：`id`、`trigger`、`scope`、`status`、`progress`、文档/资源计数、`created_at`、`started_at`、`finished_at`、`cancel_requested_at`。`progress` 为 `0` 到 `100` 的百分数，与前端进度条单位一致。
 
-### 10.3 任务详情
+### 10.4 任务详情
 
 `GET /api/v1/backup-jobs/{job_id}`
 
@@ -876,7 +938,7 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 
 详情增加：状态原因、等待额度凭据数、下次重试时间、合并来源、问题计数、清理统计和是否可取消/重新执行。
 
-### 10.4 子任务列表
+### 10.5 子任务列表
 
 `GET /api/v1/backup-jobs/{job_id}/subtasks`
 
@@ -884,9 +946,19 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 - Query：`page`、`page_size`、可选 `status`、`credential_id`、`repository_id`；
 - 默认排序：`created_at ASC`；
 - 成功：`200`，分页子任务；
-- 字段包括凭据/知识库安全摘要、状态、计数、`next_retry_at` 和最后问题摘要。
+- 字段包括凭据/知识库安全摘要、状态、计数、`next_retry_at`、最后问题摘要和可空的 `activity`。
 
-### 10.5 问题列表
+`activity` 是从持久化队列实时读取的当前操作快照，不新增另一套任务状态。字段包括：
+
+- `stage`：`queued`、`waiting_retry`、`repository_metadata`、`repository_toc`、`repository_documents`、`repository_deletions`、`document_fetch`、`resource_download`、`resource_retry`、`document_commit`；
+- `document_title`、`resource_name`：当前文档和资源的安全显示名称；
+- `resource_completed`、`resource_total`：当前文档资源进度；
+- `attempt`、`max_attempts`、`retry_in_seconds`、`last_error_code`：当前资源尝试与退避信息；
+- `updated_at`：活动快照更新时间。
+
+前端在任务详情打开期间每 4 秒刷新任务、子任务和问题，以展示上述活动；任务状态仍以总任务和子任务的公开状态为准。
+
+### 10.6 问题列表
 
 `GET /api/v1/backup-jobs/{job_id}/issues`
 
@@ -897,7 +969,9 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 
 问题字段：`id`、`level`、`code`、安全 `message`、关联 ID/标题、资源类型、安全 URL、HTTP 状态、尝试次数、首次/最后时间。不得返回 Token、Cookie、请求头、堆栈或带敏感查询参数的 URL。
 
-### 10.6 取消任务
+资源下载错误中，`RESOURCE_TLS_ERROR` 表示资源服务器 HTTPS 证书无法通过可信链校验，属于不可重试错误；不得将其降级为普通 HTTP 或全局关闭证书校验。`RESOURCE_NETWORK_ERROR` 仅用于可能恢复的临时网络异常。
+
+### 10.7 取消任务
 
 `POST /api/v1/backup-jobs/{job_id}/cancel`
 
@@ -908,7 +982,7 @@ worker 通过统一队列调用语雀 `GET /api/v2/user`。验证结果映射：
 
 取消在原子单元完成后生效，已提交数据和检查点保留。
 
-### 10.7 重新执行任务
+### 10.8 重新执行任务
 
 `POST /api/v1/backup-jobs/{job_id}/rerun`
 
@@ -1173,6 +1247,7 @@ MVP 不存在第二种本地角色，不在响应中返回权限数组，也不�
 | `JOB_NOT_CANCELLABLE` | 409 |
 | `JOB_NOT_RERUNNABLE` | 409 |
 | `NO_ENABLED_TARGETS` | 409 |
+| `RATE_LIMIT_INSUFFICIENT` | 409 |
 | `INVALID_CRON` | 422 |
 | `INVALID_TIMEZONE` | 422 |
 | `TOMBSTONE_NOT_FOUND` | 404 |
@@ -1199,12 +1274,23 @@ MVP 不存在第二种本地角色，不在响应中返回权限数组，也不�
 
 ### 16.3 手动备份
 
-1. `POST /backup-jobs`；
-2. 每 3 至 5 秒查询 `GET /backup-jobs/{id}`；
-3. 需要下钻时查询 subtasks 和 issues；
-4. 进入终态后停止轮询并刷新仪表盘、知识库和文档。
+1. 查询 `/credentials`，只允许选择已验证并启用的有效凭据；
+2. 按凭据查询 `/repositories`，选择该凭据作为可用主凭据且连接正常的一个或多个知识库；
+3. 使用 `repositories` 范围调用 `POST /backup-jobs/estimate`，展示备份范围、明确标记为预计的 API 请求数和最近实际额度快照；
+4. 额度明确不足时阻止确认；额度充足或未知时，用户确认后调用 `POST /backup-jobs`；
+5. 每 3 至 5 秒查询 `GET /backup-jobs/{id}`，需要下钻时查询 subtasks 和 issues；
+6. 进入终态后停止轮询并刷新仪表盘、知识库和文档。
 
-### 16.4 离线浏览
+### 16.4 定时备份
+
+1. 凭据、知识库选择和额度预估顺序与 16.3 节相同；
+2. 在确认步骤增加每日执行时间，沿用 `GET /settings/schedule` 返回的时区；
+3. 通过知识库选择接口持久化当前凭据下的 `Repository.selected`，再通过 `PUT /settings/schedule` 保存 `minute hour * * *`；
+4. 当前额度不足不阻止保存计划；计划触发后，worker 会将对应子任务标记为 `waiting_quota`、持久化原因和下次尝试时间，额度可用后继续执行。
+
+定时范围继续复用现有全局知识库选择和单一 Cron 设置，不新增独立计划模型。保存当前凭据的选择不会删除其他凭据已保存的知识库选择。
+
+### 16.5 离线浏览
 
 本地浏览、搜索、版本、预览和下载接口只依赖 API、SQLite 和内容目录。语雀不可访问时，这些 GET 接口仍必须正常工作；只有验证、发现和备份任务会受到语雀连接状态影响。
 
@@ -1231,5 +1317,7 @@ MVP 不存在第二种本地角色，不在响应中返回权限数组，也不�
 6. [Pydantic v2 Strict Mode](https://docs.pydantic.dev/latest/concepts/strict_mode/)：关键字段使用严格校验，避免字符串被静默转换成数字或布尔值。
 7. [Pydantic v2 Datetime](https://docs.pydantic.dev/latest/api/standard_library_types/)：使用带时区 datetime 类型并按 ISO 8601 序列化。
 8. [Pydantic v2 Serialization](https://docs.pydantic.dev/latest/concepts/serialization/)：PATCH 通过已设置字段和 `exclude_unset` 区分省略字段。
+9. [Pydantic v2 Unions](https://docs.pydantic.dev/latest/concepts/unions/#discriminated-unions-with-str-discriminators)：任务范围使用 `Literal` 和字段判别器扩展为严格的可辨识联合类型。
+10. [Vue Router 4 Nested Routes](https://router.vuejs.org/guide/essentials/nested-routes.html) 与 [Route Meta Fields](https://router.vuejs.org/guide/advanced/meta.html)：备份任务使用子路径和路由元数据实现二级菜单及激活状态。
 
 核验日期：`2026-07-23`。上述资料用于确认框架能力，不改变《需求文档.md》和《技术方案文档.md》的产品边界。

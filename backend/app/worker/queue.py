@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -11,7 +12,6 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.models import BackupJob, Operation, QueueItem, YuqueCredential
 
 TRANSIENT_RETRY_DELAYS = (2, 10, 30)
-QUOTA_MAX_DELAY_SECONDS = 3600
 _ACTIVE_STATUSES = ("pending", "running", "retry_wait")
 _RUNNABLE_JOB_STATUSES = {"queued", "running", "waiting_quota"}
 _RUNNABLE_OPERATION_STATUSES = {"queued", "running", "waiting_quota"}
@@ -24,6 +24,22 @@ _ACTIVE_CREDENTIAL_CATEGORIES = {
 
 class QueueLeaseLost(RuntimeError):
     """The queue item reached a terminal state outside the current worker."""
+
+
+def next_quota_retry_at(
+    current: datetime,
+    *,
+    timezone_name: str,
+    retry_after_seconds: int | None = None,
+) -> datetime:
+    current_utc = current.replace(tzinfo=UTC) if current.tzinfo is None else current.astimezone(UTC)
+    timezone = ZoneInfo(timezone_name)
+    next_local_date = current_utc.astimezone(timezone).date() + timedelta(days=1)
+    next_daily_window = datetime.combine(next_local_date, time.min, tzinfo=timezone).astimezone(UTC)
+    if retry_after_seconds is None:
+        return next_daily_window
+    server_retry_at = current_utc + timedelta(seconds=max(0, retry_after_seconds))
+    return max(next_daily_window, server_retry_at)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,9 +85,11 @@ class PersistentQueue:
         session_factory: sessionmaker[Session],
         *,
         now: Callable[[], datetime] | None = None,
+        quota_timezone: str = "Asia/Shanghai",
     ) -> None:
         self._session_factory = session_factory
         self._now = now or (lambda: datetime.now(UTC))
+        self._quota_timezone = quota_timezone
 
     def enqueue(
         self,
@@ -185,6 +203,19 @@ class PersistentQueue:
             session.flush()
             return item.attempt_count
 
+    def set_activity(
+        self,
+        item_id: str,
+        worker_id: str,
+        activity: dict[str, Any],
+    ) -> None:
+        with self._session_factory.begin() as session:
+            item = self._owned(session, item_id, worker_id)
+            payload = dict(item.payload)
+            payload["_activity"] = activity
+            item.payload = payload
+            item.updated_at = self._now()
+
     def complete(self, item_id: str, worker_id: str) -> None:
         self._finish(item_id, worker_id, "succeeded")
 
@@ -244,17 +275,18 @@ class PersistentQueue:
         with self._session_factory.begin() as session:
             item = self._owned(session, item_id, worker_id)
             payload = dict(item.payload)
-            quota_attempt = int(payload.get("_quota_attempt", 0)) + 1
-            payload["_quota_attempt"] = quota_attempt
-            fallback = min(60 * (2 ** (quota_attempt - 1)), QUOTA_MAX_DELAY_SECONDS)
-            delay = retry_after_seconds if retry_after_seconds is not None else fallback
-            next_retry_at = current + timedelta(seconds=max(0, delay))
+            payload.pop("_quota_attempt", None)
+            next_retry_at = next_quota_retry_at(
+                current,
+                timezone_name=self._quota_timezone,
+                retry_after_seconds=retry_after_seconds,
+            )
             item.payload = payload
             item.status = "retry_wait"
             item.next_retry_at = next_retry_at
             item.available_at = next_retry_at
             item.last_error_code = code
-            item.last_error_message = "Waiting for Yuque API quota"
+            item.last_error_message = "Waiting for the next daily Yuque API quota window"
             item.lease_owner = None
             item.lease_until = None
             return next_retry_at
@@ -269,7 +301,11 @@ class PersistentQueue:
         priority: int | None = None,
     ) -> None:
         current = self._now()
-        payload = {key: value for key, value in payload.items() if key != "_quota_attempt"}
+        payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"_activity", "_quota_attempt"}
+        }
         with self._session_factory.begin() as session:
             item = self._owned(session, item_id, worker_id)
             item.payload = payload

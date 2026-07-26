@@ -11,6 +11,7 @@ import type {
   JobScope,
   Operation,
   Paginated,
+  QuotaEstimate,
   Repository,
   RetentionSetting,
   ScheduleSetting,
@@ -551,6 +552,10 @@ function sameScope(left: JobScope, right: JobScope): boolean {
   if (left.type !== right.type) return false
   if (left.type === 'credential' && right.type === 'credential') return left.credential_id === right.credential_id
   if (left.type === 'repository' && right.type === 'repository') return left.repository_id === right.repository_id
+  if (left.type === 'repositories' && right.type === 'repositories') {
+    return left.credential_id === right.credential_id
+      && [...left.repository_ids].sort().join(',') === [...right.repository_ids].sort().join(',')
+  }
   return left.type === 'all' && right.type === 'all'
 }
 
@@ -617,19 +622,85 @@ function validateJobScope(value: unknown): JobScope {
     if (!credential?.enabled) fail(409, 'NO_ENABLED_TARGETS', '知识库的主凭据当前不可用。')
     return { type: 'repository', repository_id: repository.id }
   }
+  if (scope.type === 'repositories') {
+    requireExactFields(scope, ['type', 'credential_id', 'repository_ids'])
+    const credentialId = requireUuid(scope.credential_id, 'scope.credential_id')
+    const credential = credentials.find((item) => item.id === credentialId)
+    if (!credential) fail(404, 'CREDENTIAL_NOT_FOUND', '凭据不存在。')
+    if (!Array.isArray(scope.repository_ids) || scope.repository_ids.length < 1 || scope.repository_ids.length > 1000) {
+      fail(422, 'VALIDATION_ERROR', '至少选择一个知识库。', [{ field: 'scope.repository_ids', reason: 'length' }])
+    }
+    const repositoryIds = [...new Set(scope.repository_ids.map((value, index) => requireUuid(value, `scope.repository_ids.${index}`)))]
+    const selected = repositoryIds.map((id) => repositories.find((item) => item.id === id))
+    if (selected.some((item) => !item)) fail(404, 'REPOSITORY_NOT_FOUND', '知识库不存在。')
+    if (selected.some((item) => item?.primary_credential_id !== credential.id || item.connection_status !== 'connected')) {
+      fail(409, 'CREDENTIAL_CANNOT_ACCESS_REPOSITORY', '所选凭据不是全部所选知识库的可用主凭据。')
+    }
+    return { type: 'repositories', credential_id: credential.id, repository_ids: repositoryIds }
+  }
   fail(422, 'VALIDATION_ERROR', '任务范围不合法。', [{ field: 'scope.type', reason: 'enum' }])
 }
 
 function scopeIncludesCredential(scope: JobScope, credentialId: string): boolean {
   if (scope.type === 'all') return true
   if (scope.type === 'credential') return scope.credential_id === credentialId
+  if (scope.type === 'repositories') return scope.credential_id === credentialId
   return repositories.find((item) => item.id === scope.repository_id)?.primary_credential_id === credentialId
 }
 
 function scopeIncludesRepository(scope: JobScope, repositoryId: string): boolean {
   if (scope.type === 'all') return true
   if (scope.type === 'repository') return scope.repository_id === repositoryId
+  if (scope.type === 'repositories') return scope.repository_ids.includes(repositoryId)
   return repositories.find((item) => item.id === repositoryId)?.primary_credential_id === scope.credential_id
+}
+
+function quotaEstimate(scope: JobScope): QuotaEstimate {
+  const targetRepositories = scope.type === 'all'
+    ? repositories.filter((item) => item.selected && item.primary_credential_id)
+    : scope.type === 'credential'
+      ? repositories.filter((item) => item.selected && item.primary_credential_id === scope.credential_id)
+      : scope.type === 'repository'
+        ? repositories.filter((item) => item.id === scope.repository_id)
+        : repositories.filter((item) => scope.repository_ids.includes(item.id))
+  const grouped = new Map<string, Repository[]>()
+  targetRepositories.forEach((repository) => {
+    const id = repository.primary_credential_id!
+    grouped.set(id, [...(grouped.get(id) ?? []), repository])
+  })
+  const estimates = [...grouped].map(([credentialId, items]) => {
+    const credential = credentials.find((item) => item.id === credentialId)!
+    const documentCount = items.reduce((total, item) => total + item.document_count, 0)
+    const estimatedCalls = items.reduce((total, item) => (
+      total + 2 + Math.max(1, Math.ceil(item.document_count / 100)) + item.document_count + (item.last_success_at ? 1 : 0)
+    ), 0)
+    const remaining = credential.rate_limit?.remaining ?? null
+    return {
+      credential_id: credential.id,
+      credential_name: credential.name,
+      repository_count: items.length,
+      document_count: documentCount,
+      estimated_api_calls: estimatedCalls,
+      rate_limit_limit: credential.rate_limit?.limit ?? null,
+      rate_limit_remaining: remaining,
+      rate_limit_observed_at: credential.rate_limit?.observed_at ?? null,
+      snapshot_fresh: credential.rate_limit !== null,
+      sufficient: remaining === null ? null : remaining >= estimatedCalls,
+    }
+  })
+  return {
+    repository_count: targetRepositories.length,
+    document_count: estimates.reduce((total, item) => total + item.document_count, 0),
+    estimated_api_calls: estimates.reduce((total, item) => total + item.estimated_api_calls, 0),
+    is_precise: false,
+    credentials: estimates,
+    calculation_basis: [
+      '每个知识库包含详情与目录请求',
+      '文档列表按语雀官方每页最多 100 条估算',
+      '增量任务包含已删除文档列表请求',
+      '按本地已知文档数估算详情请求；远端变化数和 Table 额外分页无法预先精确获知',
+    ],
+  }
 }
 
 function createOperation(type: Operation['type'], credentialId: string): Operation {
@@ -764,7 +835,7 @@ export async function mockRequest<T>(path: string, options: RequestOptions = {})
       const credential = credentials.find((item) => item.id === state.operation.credential_id)
       if (credential && state.operation.type === 'credential_verify') {
         state.operation.result = { subject_type: 'user', login: 'mock-user' }
-        credential.status = 'valid'; credential.subject_type = 'user'; credential.subject_id = 'mock-user-id'; credential.login = 'mock-user'; credential.last_verified_at = new Date().toISOString()
+        credential.status = 'valid'; credential.subject_type = 'user'; credential.subject_id = 'mock-user-id'; credential.login = 'mock-user'; credential.last_verified_at = new Date().toISOString(); credential.rate_limit = { limit: 5000, remaining: 4999, observed_at: new Date().toISOString() }; credential.next_retry_at = null
         syncRepositoriesForCredential(credential.id)
       } else if (credential) {
         state.operation.result = applyRepositoryDiscovery(credential)
@@ -980,9 +1051,19 @@ export async function mockRequest<T>(path: string, options: RequestOptions = {})
     requireExactFields(body, ['scope'])
     const idempotent = idempotency(url.pathname, options, body)
     if (idempotent.replay !== undefined) return idempotent.replay as T
-    const response = enqueueOrMerge(validateJobScope(body.scope))
+    const scope = validateJobScope(body.scope)
+    const estimate = quotaEstimate(scope)
+    const insufficient = estimate.credentials.find((item) => item.sufficient === false)
+    if (insufficient) {
+      fail(409, 'RATE_LIMIT_INSUFFICIENT', `凭据“${insufficient.credential_name}”最近一次语雀响应显示剩余额度 ${insufficient.rate_limit_remaining}, 低于本次预计 ${insufficient.estimated_api_calls} 次请求`)
+    }
+    const response = enqueueOrMerge(scope)
     rememberIdempotency(url.pathname, idempotent, response)
     return clone(response) as T
+  }
+  if (method === 'POST' && url.pathname === '/backup-jobs/estimate') {
+    requireExactFields(body, ['scope'])
+    return clone(quotaEstimate(validateJobScope(body.scope))) as T
   }
   if (parts[0] === 'backup-jobs' && parts[1]) {
     const job = jobs.find((item) => item.id === parts[1])
@@ -1009,7 +1090,7 @@ export async function mockRequest<T>(path: string, options: RequestOptions = {})
     }
     if (parts[2] === 'subtasks' && method === 'GET') {
       requireQueryFields(url, ['page', 'page_size', 'status', 'credential_id', 'repository_id'])
-      const subtasks: BackupSubtask[] = repositories.slice(0, 2).map((repo, index) => ({ id: stableGeneratedUuid(`subtask:${job.id}:${repo.id}`), credential: { id: credentials[index]!.id, name: credentials[index]!.name, status: credentials[index]!.status }, repository: { id: repo.id, name: repo.name }, status: index === 1 && job.status === 'running' ? 'waiting_quota' : job.status, document_total: repo.document_count, document_completed: Math.floor(repo.document_count * job.progress / 100), issue_count: index === 0 ? job.issue_count : 0, next_retry_at: index === 1 ? job.next_retry_at : null, last_issue: index === 0 && job.issue_count ? issues[0]!.message : null, created_at: job.created_at }))
+      const subtasks: BackupSubtask[] = repositories.slice(0, 2).map((repo, index) => ({ id: stableGeneratedUuid(`subtask:${job.id}:${repo.id}`), credential: { id: credentials[index]!.id, name: credentials[index]!.name, status: credentials[index]!.status }, repository: { id: repo.id, name: repo.name }, status: index === 1 && job.status === 'running' ? 'waiting_quota' : job.status, document_total: repo.document_count, document_completed: Math.floor(repo.document_count * job.progress / 100), issue_count: index === 0 ? job.issue_count : 0, next_retry_at: index === 1 ? job.next_retry_at : null, last_issue: index === 0 && job.issue_count ? issues[0]!.message : null, activity: job.status === 'running' && index === 0 ? { stage: 'resource_retry', document_title: 'Linux 网络配置', resource_name: 'network-topology.png', resource_completed: 2, resource_total: 5, attempt: 2, max_attempts: 4, retry_in_seconds: 10, last_error_code: 'RESOURCE_NETWORK_ERROR', updated_at: new Date().toISOString() } : null, created_at: job.created_at }))
       const { pageNumber, pageSize } = pagination(url)
       const status = queryEnum(url, 'status', jobStatusValues)
       const credentialId = queryUuid(url, 'credential_id')

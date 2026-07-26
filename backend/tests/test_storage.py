@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 from pathlib import Path
 
 import httpx
@@ -180,4 +181,30 @@ async def test_resource_limit_and_private_address_are_rejected(tmp_path: Path) -
     with pytest.raises(ResourceDownloadError) as private_error:
         await private.download("https://internal.example/a", job_id="job", max_bytes=100)
     assert private_error.value.code == "RESOURCE_SSRF_BLOCKED"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tls_certificate_error_is_not_reported_as_transient_network_failure(
+    tmp_path: Path,
+) -> None:
+    class CertificateFailureTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            try:
+                raise ssl.SSLCertVerificationError(1, "certificate verify failed")
+            except ssl.SSLCertVerificationError as exc:
+                raise httpx.ConnectError("certificate verify failed", request=request) from exc
+
+    client = httpx.AsyncClient(transport=CertificateFailureTransport())
+    downloader = AssetDownloader(ContentStore(tmp_path), client=client, resolver=public_resolver)
+
+    with pytest.raises(ResourceDownloadError) as exc_info:
+        await downloader.download(
+            "https://cdn.example/image.jpg",
+            job_id="job-tls",
+            max_bytes=1024,
+        )
+
+    assert exc_info.value.code == "RESOURCE_TLS_ERROR"
+    assert exc_info.value.transient is False
     await client.aclose()

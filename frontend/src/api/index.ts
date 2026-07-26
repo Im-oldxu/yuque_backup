@@ -4,7 +4,7 @@ import type {
   Admin, AssetListParams, AssetReference, BackupIssue, BackupJob, BackupSubtask, Credential, CredentialListParams,
   DashboardSummary, DocumentDetail, DocumentListParams, DocumentSummary, InitializationStatus, IssueListParams,
   JobIssueListParams, JobListParams, JobScope, Operation, Paginated, PaginationParams, Repository,
-  RepositoryListParams, RetentionSetting, ScheduleSetting, SearchResults, StorageSetting, SubtaskListParams,
+  QuotaEstimate, RepositoryListParams, RetentionSetting, ScheduleSetting, SearchResults, StorageSetting, SubtaskListParams,
   TocTree, Tombstone, TombstoneListParams, VersionDetail, VersionListParams, VersionSummary,
 } from './types'
 
@@ -66,6 +66,7 @@ export const api = {
 
   getJobs: (filters: JobListParams = {}) => request<Paginated<BackupJob>>(`/backup-jobs${listQuery(filters)}`),
   getJob: (id: string) => request<BackupJob>(`/backup-jobs/${id}`),
+  estimateJob: (scope: JobScope) => request<QuotaEstimate>('/backup-jobs/estimate', { method: 'POST', body: { scope } }),
   createJob: (scope: JobScope) => request<{ job: BackupJob; merged: boolean }>('/backup-jobs', { method: 'POST', idempotencyKey: createIdempotencyKey(), body: { scope } }),
   cancelJob: (id: string) => request<BackupJob>(`/backup-jobs/${id}/cancel`, { method: 'POST' }),
   rerunJob: (id: string) => request<{ job: BackupJob; merged: boolean }>(`/backup-jobs/${id}/rerun`, { method: 'POST', idempotencyKey: createIdempotencyKey() }),

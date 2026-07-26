@@ -375,6 +375,7 @@ def test_dashboard_summary_uses_database_counts_and_worker_heartbeat(
     summary = response.json()
     assert summary["current_job"]["id"] == ids["running_job"]
     assert summary["current_job"]["scope"] == {"type": "all"}
+    assert summary["current_job"]["progress"] == 50.0
     assert summary["current_job"]["can_cancel"] is False
     assert summary["job_counts"] == {"succeeded": 1, "partial": 1, "failed": 1}
     assert summary["waiting_quota_credentials"] == 1

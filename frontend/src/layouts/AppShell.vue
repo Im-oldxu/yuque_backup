@@ -4,9 +4,9 @@ import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
   Badge, Button, Separator, Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent,
   SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem,
-  SidebarProvider, SidebarRail, SidebarTrigger, toast,
+  SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem, SidebarProvider, SidebarRail, SidebarTrigger, toast,
 } from '@/components/ui'
-import { ArchiveX, BookOpen, ChevronRight, DatabaseBackup, Gauge, KeyRound, ListChecks, LogOut, Moon, Settings, Sun } from 'lucide-vue-next'
+import { ArchiveX, BookOpen, CalendarClock, ChevronRight, DatabaseBackup, Gauge, KeyRound, ListChecks, LogOut, Moon, Play, Settings, Sun } from 'lucide-vue-next'
 import { API_MODE } from '@/api'
 import { useSessionStore } from '@/stores/session'
 
@@ -15,10 +15,12 @@ const router = useRouter()
 const session = useSessionStore()
 const dark = ref(false)
 
-const navigation = [
+const primaryNavigation = [
   { label: '仪表盘', path: '/dashboard', icon: Gauge },
   { label: '知识库', path: '/repositories', icon: BookOpen },
-  { label: '备份任务', path: '/jobs', icon: ListChecks },
+]
+
+const secondaryNavigation = [
   { label: '语雀凭据', path: '/credentials', icon: KeyRound },
   { label: '删除记录', path: '/tombstones', icon: ArchiveX },
   { label: '设置', path: '/settings', icon: Settings },
@@ -26,6 +28,7 @@ const navigation = [
 
 const pageTitle = computed(() => String(route.meta.title ?? '语雀备份'))
 const activePath = computed(() => String(route.meta.activePath ?? route.path))
+const backupActive = computed(() => activePath.value.startsWith('/jobs/'))
 
 onMounted(() => {
   dark.value = localStorage.getItem('yb_theme') === 'dark' || (!localStorage.getItem('yb_theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)
@@ -67,7 +70,35 @@ async function logout() {
           <SidebarGroupLabel>工作区</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              <SidebarMenuItem v-for="item in navigation" :key="item.path">
+              <SidebarMenuItem v-for="item in primaryNavigation" :key="item.path">
+                <SidebarMenuButton as-child :is-active="activePath === item.path" :tooltip="item.label">
+                  <RouterLink :to="item.path">
+                    <component :is="item.icon" />
+                    <span>{{ item.label }}</span>
+                    <ChevronRight v-if="activePath === item.path" class="ml-auto group-data-[collapsible=icon]:hidden" />
+                  </RouterLink>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton :is-active="backupActive" tooltip="备份任务">
+                  <ListChecks />
+                  <span>备份任务</span>
+                  <ChevronRight class="ml-auto group-data-[collapsible=icon]:hidden" />
+                </SidebarMenuButton>
+                <SidebarMenuSub>
+                  <SidebarMenuSubItem>
+                    <SidebarMenuSubButton as-child :is-active="activePath === '/jobs/manual'">
+                      <RouterLink to="/jobs/manual"><Play /><span>手动备份</span></RouterLink>
+                    </SidebarMenuSubButton>
+                  </SidebarMenuSubItem>
+                  <SidebarMenuSubItem>
+                    <SidebarMenuSubButton as-child :is-active="activePath === '/jobs/scheduled'">
+                      <RouterLink to="/jobs/scheduled"><CalendarClock /><span>定时备份</span></RouterLink>
+                    </SidebarMenuSubButton>
+                  </SidebarMenuSubItem>
+                </SidebarMenuSub>
+              </SidebarMenuItem>
+              <SidebarMenuItem v-for="item in secondaryNavigation" :key="item.path">
                 <SidebarMenuButton as-child :is-active="activePath === item.path" :tooltip="item.label">
                   <RouterLink :to="item.path">
                     <component :is="item.icon" />

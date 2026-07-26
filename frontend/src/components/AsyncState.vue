@@ -1,16 +1,38 @@
 <script setup lang="ts">
-import { Alert, AlertDescription, AlertTitle, Button, Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle, Skeleton } from '@/components/ui'
+import { onBeforeUnmount, ref, watch } from 'vue'
+import { Alert, AlertDescription, AlertTitle, Button, Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle, Spinner } from '@/components/ui'
 import { CircleAlert, Inbox, RefreshCw } from 'lucide-vue-next'
 
-defineProps<{ loading: boolean; error?: string; empty?: boolean; emptyTitle?: string; emptyDescription?: string }>()
+const props = withDefaults(defineProps<{ loading: boolean; error?: string; empty?: boolean; emptyTitle?: string; emptyDescription?: string; loadingDelay?: number }>(), {
+  loadingDelay: 180,
+})
 defineEmits<{ retry: [] }>()
+
+const showLoadingIndicator = ref(false)
+let loadingTimer: ReturnType<typeof setTimeout> | undefined
+
+function updateLoadingIndicator() {
+  if (loadingTimer) clearTimeout(loadingTimer)
+  loadingTimer = undefined
+  showLoadingIndicator.value = false
+  if (!props.loading) return
+  if (props.loadingDelay <= 0) {
+    showLoadingIndicator.value = true
+    return
+  }
+  loadingTimer = setTimeout(() => {
+    showLoadingIndicator.value = props.loading
+    loadingTimer = undefined
+  }, props.loadingDelay)
+}
+
+watch(() => [props.loading, props.loadingDelay] as const, updateLoadingIndicator, { immediate: true })
+onBeforeUnmount(() => { if (loadingTimer) clearTimeout(loadingTimer) })
 </script>
 
 <template>
-  <div v-if="loading" class="flex flex-col gap-3" aria-live="polite" aria-label="正在加载">
-    <Skeleton class="h-10 w-full" />
-    <Skeleton class="h-16 w-full" />
-    <Skeleton class="h-16 w-full" />
+  <div v-if="loading" class="flex min-h-24 items-center justify-center" aria-live="polite" aria-label="正在加载">
+    <Spinner v-if="showLoadingIndicator" class="size-5 text-muted-foreground" />
   </div>
   <Alert v-else-if="error" variant="destructive">
     <CircleAlert />

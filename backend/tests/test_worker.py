@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
@@ -19,6 +21,7 @@ from app.core.models import (
     DocumentVersion,
     Operation,
     QueueItem,
+    RateLimitBucket,
     Repository,
     RepositoryCredential,
     RetentionPolicy,
@@ -28,9 +31,14 @@ from app.core.models import (
     YuqueCredential,
 )
 from app.core.security import encrypt_token
-from app.integrations.yuque.client import YuqueQuotaError
+from app.integrations.yuque.client import RateLimitSnapshot, YuqueQuotaError
 from app.worker.coordinator import JobCoordinator
-from app.worker.queue import PersistentQueue, QueueItemSnapshot, QueueLeaseLost
+from app.worker.queue import (
+    PersistentQueue,
+    QueueItemSnapshot,
+    QueueLeaseLost,
+    next_quota_retry_at,
+)
 from app.worker.service import WorkerService
 
 
@@ -79,6 +87,58 @@ def test_queue_recovers_leases_and_uses_documented_retry_delays(tmp_path: Path) 
     assert queue.recover_expired() == 1
     recovered = queue.claim("worker-b", lease_seconds=30)
     assert recovered and recovered.attempt_count == 1
+
+
+def test_quota_retry_waits_until_next_local_day() -> None:
+    current = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
+
+    assert next_quota_retry_at(
+        current,
+        timezone_name="Asia/Shanghai",
+        retry_after_seconds=73,
+    ) == datetime(2026, 7, 23, 16, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_zero_remaining_snapshot_pauses_credential_until_next_local_day(
+    tmp_path: Path,
+) -> None:
+    sessions = make_session_factory(tmp_path)
+    settings = make_settings(tmp_path)
+    clock = Clock(datetime(2026, 7, 23, 12, 0, tzinfo=UTC))
+    credential_id = "44444444-4444-4444-8444-444444444444"
+    encrypted, nonce = encrypt_token("token", credential_id, settings)
+    with sessions.begin() as session:
+        session.add(
+            YuqueCredential(
+                id=credential_id,
+                name="zero-quota-credential",
+                base_url="https://www.yuque.com",
+                encrypted_token=encrypted,
+                token_nonce=nonce,
+                token_suffix="oken",
+                subject_type="user",
+                subject_id="subject-zero",
+                status="valid",
+                verification_valid=True,
+                enabled=True,
+            )
+        )
+
+    service = WorkerService(sessions, settings, now=clock.now)
+    service.executor._persist_rate(
+        credential_id,
+        RateLimitSnapshot(limit=5000, remaining=0, observed_at=clock.now()),
+    )
+
+    expected_retry = datetime(2026, 7, 23, 16, 0)
+    with sessions() as session:
+        credential = session.get(YuqueCredential, credential_id)
+        bucket = session.scalar(select(RateLimitBucket))
+        assert credential is not None and credential.status == "waiting_quota"
+        assert credential.next_retry_at == expected_retry
+        assert bucket is not None and bucket.next_allowed_at == expected_retry
+    await service.aclose()
 
 
 def test_cancelled_running_job_item_never_reclaims_after_lease_expiry(tmp_path: Path) -> None:
@@ -237,9 +297,22 @@ async def test_document_commit_recovery_is_idempotent_after_queue_completion_cra
         subtask_id = subtask.id
 
     detail_calls = 0
+    markdown_body = (
+        "# Durable\n\n"
+        "![diagram](https://cdn.example/diagram.png)\n\n"
+        "[Ubuntu ISO](https://mirror.example/ubuntu.iso)\n\n"
+        "[manual](https://www.yuque.com/attachments/manual.pdf)"
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal detail_calls
+        if request.url.path == "/attachments/manual.pdf":
+            assert request.headers["X-Auth-Token"] == "token"
+            return httpx.Response(
+                200,
+                content=b"attachment",
+                headers={"Content-Type": "application/pdf"},
+            )
         assert request.url.path == "/api/v2/repos/docs/doc-crash"
         detail_calls += 1
         return httpx.Response(
@@ -251,8 +324,11 @@ async def test_document_commit_recovery_is_idempotent_after_queue_completion_cra
                     "slug": "crash",
                     "type": "Doc",
                     "format": "markdown",
-                    "body": "# Durable",
-                    "body_html": "<h1>Durable</h1>",
+                    "body": markdown_body,
+                    "body_html": (
+                        '<h1>Durable</h1><img src="https://cdn.example/diagram.png">'
+                        '<a href="https://www.yuque.com/attachments/manual.pdf">manual</a>'
+                    ),
                     "latest_version_id": "remote-v1",
                 }
             },
@@ -271,6 +347,11 @@ async def test_document_commit_recovery_is_idempotent_after_queue_completion_cra
         resource_http_client=client,
         now=clock.now,
     )
+
+    async def public_resolver(_host: str, _port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(service.asset_downloader, "_resolver", public_resolver)
     original_complete = service.queue.complete
 
     def crash_before_queue_completion(_item_id: str, _worker_id: str) -> None:
@@ -291,6 +372,23 @@ async def test_document_commit_recovery_is_idempotent_after_queue_completion_cra
         assert subtask.document_succeeded == 1
         assert item is not None and item.status == "running"
         assert checkpoint is not None and checkpoint.data["queue_item_id"] == item_id
+        version = session.scalar(
+            select(DocumentVersion).where(DocumentVersion.document_id == item.document_id)
+        )
+        assert version is not None
+        assert version.completeness == "complete"
+        assert version.resource_total == 1
+        assert version.resource_downloaded == 1
+        assert version.raw_body_path is not None
+        raw_body_path = settings.data_root / version.raw_body_path
+        references = list(
+            session.scalars(select(VersionAsset).where(VersionAsset.version_id == version.id))
+        )
+        assert len(references) == 1
+        assert references[0].original_url == "https://www.yuque.com/attachments/manual.pdf"
+        assert references[0].type == "attachment"
+
+    assert raw_body_path.read_text(encoding="utf-8") == markdown_body
 
     monkeypatch.setattr(service.queue, "complete", original_complete)
     clock.advance(seconds=settings.queue_lease_seconds + 1)
@@ -338,6 +436,36 @@ async def test_idle_worker_writes_heartbeat_only_at_configured_interval(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_worker_retries_after_transient_sqlite_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = make_session_factory(tmp_path)
+    settings = make_settings(tmp_path)
+    service = WorkerService(sessions, settings, worker_id="lock-retry-worker")
+    original_recover = service.queue.recover_expired
+    calls = 0
+
+    def recover_with_one_lock() -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OperationalError(
+                "UPDATE queue_item",
+                {},
+                sqlite3.OperationalError("database is locked"),
+            )
+        return original_recover()
+
+    monkeypatch.setattr(service.queue, "recover_expired", recover_with_one_lock)
+
+    assert await service.run_once() is False
+    assert await service.run_once() is False
+    assert calls == 2
+    await service.aclose()
+
+
+@pytest.mark.asyncio
 async def test_lease_loss_inside_quota_handler_does_not_escape_worker_item(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -377,6 +505,248 @@ async def test_lease_loss_inside_quota_handler_does_not_escape_worker_item(
     await service.executor.handle(item, service.worker_id)
     assert await service.run_once() is False
     await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_quota_error_pauses_other_items_for_the_same_credential(tmp_path: Path) -> None:
+    sessions = make_session_factory(tmp_path)
+    settings = make_settings(tmp_path)
+    clock = Clock(datetime(2026, 7, 23, 12, 0, tzinfo=UTC))
+    credential_id = "11111111-1111-4111-8111-111111111111"
+    encrypted, nonce = encrypt_token("token", credential_id, settings)
+    with sessions.begin() as session:
+        operation = Operation(
+            type="credential_verify",
+            credential_id=credential_id,
+            status="waiting_quota",
+            next_retry_at=clock.now() + timedelta(seconds=30),
+        )
+        session.add(
+            YuqueCredential(
+                id=credential_id,
+                name="quota-credential",
+                base_url="https://www.yuque.com",
+                encrypted_token=encrypted,
+                token_nonce=nonce,
+                token_suffix="oken",
+                subject_type="user",
+                subject_id="subject-1",
+                status="valid",
+                verification_valid=True,
+                enabled=True,
+            )
+        )
+        session.add(operation)
+        session.flush()
+        operation_id = operation.id
+
+    service = WorkerService(sessions, settings, worker_id="quota-worker", now=clock.now)
+    first = service.queue.enqueue(
+        "document_sync",
+        idempotency_key="quota-first",
+        credential_id=credential_id,
+    )
+    service.queue.enqueue(
+        "document_sync",
+        idempotency_key="quota-second",
+        operation_id=operation_id,
+        credential_id=credential_id,
+    )
+    claimed_first = service.queue.claim(service.worker_id, lease_seconds=30)
+    assert claimed_first is not None and claimed_first.id == first.id
+
+    service.executor._handle_quota_error(
+        claimed_first,
+        service.worker_id,
+        YuqueQuotaError("quota", retry_after_seconds=73),
+    )
+    expected_retry = datetime(2026, 7, 23, 16, 0, tzinfo=UTC)
+
+    claimed_second = service.queue.claim(service.worker_id, lease_seconds=30)
+    assert claimed_second is not None
+    second_credential = service.executor._credential(claimed_second)
+    assert service.executor._defer_for_rate_limit(
+        claimed_second,
+        service.worker_id,
+        second_credential,
+    ) is True
+
+    with sessions() as session:
+        bucket = session.scalar(select(RateLimitBucket))
+        second_item = session.get(QueueItem, claimed_second.id)
+        stored_credential = session.get(YuqueCredential, credential_id)
+        stored_operation = session.get(Operation, operation_id)
+        assert bucket is not None and bucket.next_allowed_at == expected_retry.replace(tzinfo=None)
+        assert second_item is not None and second_item.status == "pending"
+        assert second_item.available_at == expected_retry.replace(tzinfo=None)
+        assert stored_credential is not None and stored_credential.status == "waiting_quota"
+        assert stored_credential.next_retry_at == expected_retry.replace(tzinfo=None)
+        assert stored_operation is not None and stored_operation.status == "waiting_quota"
+        assert stored_operation.next_retry_at == expected_retry.replace(tzinfo=None)
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_verification_429_without_rate_headers_pauses_following_credential_work(
+    tmp_path: Path,
+) -> None:
+    sessions = make_session_factory(tmp_path)
+    settings = make_settings(tmp_path)
+    clock = Clock(datetime(2026, 7, 23, 12, 0, tzinfo=UTC))
+    credential_id = "22222222-2222-4222-8222-222222222222"
+    encrypted, nonce = encrypt_token("token", credential_id, settings)
+    with sessions.begin() as session:
+        credential = YuqueCredential(
+            id=credential_id,
+            name="verification-quota-credential",
+            base_url="https://www.yuque.com",
+            encrypted_token=encrypted,
+            token_nonce=nonce,
+            token_suffix="oken",
+            subject_type="user",
+            subject_id="subject-2",
+            status="valid",
+            verification_valid=True,
+            enabled=True,
+        )
+        operation = Operation(
+            type="credential_verify",
+            credential_id=credential_id,
+            status="queued",
+        )
+        session.add_all([credential, operation])
+        session.flush()
+        operation_id = operation.id
+
+    request_count = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(429, json={"message": "rate limited"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+    service = WorkerService(
+        sessions,
+        settings,
+        worker_id="verification-quota-worker",
+        yuque_http_client=client,
+        resource_http_client=client,
+        now=clock.now,
+    )
+    service.queue.enqueue(
+        "credential_verify",
+        idempotency_key="verification-quota-first",
+        priority=10,
+        operation_id=operation_id,
+        credential_id=credential_id,
+    )
+    following = service.queue.enqueue(
+        "repository_discovery",
+        idempotency_key="verification-quota-following",
+        priority=20,
+        credential_id=credential_id,
+    )
+
+    assert await service.run_once() is True
+    assert await service.run_once() is True
+    assert request_count == 1
+
+    expected_retry = datetime(2026, 7, 23, 16, 0, tzinfo=UTC)
+    with sessions() as session:
+        bucket = session.scalar(select(RateLimitBucket))
+        stored_operation = session.get(Operation, operation_id)
+        following_item = session.get(QueueItem, following.id)
+        assert bucket is not None and bucket.next_allowed_at == expected_retry.replace(tzinfo=None)
+        assert stored_operation is not None and stored_operation.status == "waiting_quota"
+        assert stored_operation.next_retry_at == expected_retry.replace(tzinfo=None)
+        assert following_item is not None and following_item.status == "pending"
+        assert following_item.available_at == expected_retry.replace(tzinfo=None)
+    await service.aclose()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_manual_quota_probe_bypasses_shared_wait_once(tmp_path: Path) -> None:
+    sessions = make_session_factory(tmp_path)
+    settings = make_settings(tmp_path)
+    clock = Clock(datetime(2026, 7, 23, 12, 0, tzinfo=UTC))
+    credential_id = "33333333-3333-4333-8333-333333333333"
+    encrypted, nonce = encrypt_token("token", credential_id, settings)
+    with sessions.begin() as session:
+        credential = YuqueCredential(
+            id=credential_id,
+            name="manual-quota-probe",
+            base_url="https://www.yuque.com",
+            encrypted_token=encrypted,
+            token_nonce=nonce,
+            token_suffix="oken",
+            subject_type="user",
+            subject_id="subject-3",
+            status="waiting_quota",
+            verification_valid=True,
+            enabled=True,
+        )
+        operation = Operation(
+            type="credential_verify",
+            credential_id=credential_id,
+            status="queued",
+        )
+        bucket = RateLimitBucket(
+            base_url=credential.base_url,
+            subject_type=credential.subject_type,
+            subject_id=credential.subject_id,
+            rate_limit_limit=5000,
+            rate_limit_remaining=0,
+            observed_at=clock.now(),
+            next_allowed_at=clock.now() + timedelta(hours=1),
+        )
+        session.add_all([credential, operation, bucket])
+        session.flush()
+        operation_id = operation.id
+        session.add(
+            QueueItem(
+                category="credential_verify",
+                payload={"credential_id": credential_id, "_force_quota_probe": True},
+                status="pending",
+                available_at=clock.now(),
+                idempotency_key=f"operation:{operation_id}",
+                operation_id=operation_id,
+                credential_id=credential_id,
+            )
+        )
+
+    request_count = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            200,
+            json={"data": {"id": "subject-3", "login": "manual", "type": "user"}},
+            headers={"X-RateLimit-Limit": "5000", "X-RateLimit-Remaining": "4999"},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+    service = WorkerService(
+        sessions,
+        settings,
+        worker_id="manual-quota-worker",
+        yuque_http_client=client,
+        resource_http_client=client,
+        now=clock.now,
+    )
+
+    assert await service.run_once() is True
+    assert request_count == 1
+    with sessions() as session:
+        stored_credential = session.get(YuqueCredential, credential_id)
+        queue_item = session.scalar(select(QueueItem).where(QueueItem.operation_id == operation_id))
+        assert stored_credential is not None and stored_credential.status == "valid"
+        assert stored_credential.rate_limit_remaining == 4999
+        assert queue_item is not None and "_force_quota_probe" not in queue_item.payload
+    await service.aclose()
+    await client.aclose()
 
 
 @pytest.mark.asyncio
@@ -558,20 +928,20 @@ async def test_purged_version_is_restored_when_same_hash_becomes_current(
             return httpx.Response(
                 200,
                 content=f"asset:{name}".encode(),
-                headers={"Content-Type": "image/png"},
+                headers={"Content-Type": "application/octet-stream"},
             )
         assert request.url.path == "/api/v2/repos/docs/doc-revival"
         detail_calls += 1
         content = state["content"]
-        asset_url = f"https://assets.example/{content}.png"
+        asset_url = f"https://assets.example/attachments/{content}.bin"
         data = {
             "id": "doc-revival",
             "title": content.title(),
             "slug": "doc",
             "type": "Doc",
             "format": "markdown",
-            "body": f"# {content}",
-            "body_html": f'<h1>{content}</h1><img src="{asset_url}">',
+            "body": f"# {content}\n\n[attachment]({asset_url})",
+            "body_html": f'<h1>{content}</h1><a href="{asset_url}">attachment</a>',
             "latest_version_id": state["remote_version_id"],
         }
         return httpx.Response(
@@ -736,7 +1106,9 @@ async def test_purged_version_is_restored_when_same_hash_becomes_current(
         revived_asset = session.get(Asset, alpha_asset_id)
         assert revived_asset is not None and revived_asset.storage_path is not None
         assert revived_asset.purged_at is None
-        assert (settings.data_root / revived_asset.storage_path).read_bytes() == b"asset:alpha.png"
+        assert (
+            settings.data_root / revived_asset.storage_path
+        ).read_bytes() == b"asset:attachments/alpha.bin"
 
     summary_item = service.queue.enqueue(
         "repository_sync",
@@ -965,8 +1337,77 @@ def test_repository_scope_promotes_unselected_target_and_queues_atomically(tmp_p
         assert queue_item is not None and queue_item.subtask_id == subtask.id
 
 
+def test_promoted_job_delays_repository_when_fresh_quota_is_insufficient(tmp_path: Path) -> None:
+    sessions = make_session_factory(tmp_path)
+    clock = Clock(datetime(2026, 7, 24, 12, 0, tzinfo=UTC))
+    credential_id = "34343434-3434-4434-8434-343434343433"
+    settings = make_settings(tmp_path)
+    encrypted, nonce = encrypt_token("token", credential_id, settings)
+    with sessions.begin() as session:
+        credential = YuqueCredential(
+            id=credential_id,
+            name="quota-limited",
+            base_url="https://www.yuque.com",
+            encrypted_token=encrypted,
+            token_nonce=nonce,
+            token_suffix="oken",
+            status="valid",
+            enabled=True,
+            verification_valid=True,
+            rate_limit_limit=5000,
+            rate_limit_remaining=0,
+            rate_limit_observed_at=clock.now(),
+        )
+        repository = Repository(
+            normalized_base_url="https://www.yuque.com",
+            yuque_book_id="book-quota-limited",
+            name="Quota limited",
+            selected=True,
+        )
+        session.add_all([credential, repository])
+        session.flush()
+        session.add(
+            RepositoryCredential(
+                repository_id=repository.id,
+                credential_id=credential.id,
+                is_primary=True,
+            )
+        )
+        job = BackupJob(
+            trigger="cron",
+            scope={
+                "type": "all",
+                "_target_repository_ids": [repository.id],
+            },
+            status="queued",
+            pending_slot=1,
+        )
+        session.add(job)
+        session.flush()
+        job_id = job.id
+
+    coordinator = JobCoordinator(
+        sessions,
+        PersistentQueue(sessions, now=clock.now),
+        now=clock.now,
+    )
+    assert coordinator.promote_pending_job() == job_id
+    assert coordinator.aggregate_job(job_id) == "waiting_quota"
+
+    with sessions() as session:
+        job = session.get(BackupJob, job_id)
+        subtask = session.scalar(select(BackupSubtask).where(BackupSubtask.job_id == job_id))
+        queue_item = session.scalar(select(QueueItem).where(QueueItem.job_id == job_id))
+        expected_retry = datetime(2026, 7, 24, 16, 0)
+        assert job is not None and job.status == "waiting_quota"
+        assert subtask is not None and subtask.status == "waiting_quota"
+        assert subtask.next_retry_at == expected_retry
+        assert subtask.last_issue == "剩余额度 0, 低于预计 3 次请求"
+        assert queue_item is not None and queue_item.available_at == expected_retry
+
+
 @pytest.mark.asyncio
-async def test_summary_timestamp_and_deleted_state_reschedule_without_advancing_checkpoint(
+async def test_summary_changes_and_partial_version_reschedule_without_advancing_checkpoint(
     tmp_path: Path,
 ) -> None:
     sessions = make_session_factory(tmp_path)
@@ -1023,22 +1464,93 @@ async def test_summary_timestamp_and_deleted_state_reschedule_without_advancing_
             remote_updated_at=old_remote_time,
             deleted_at=new_remote_time,
         )
-        session.add_all([subtask, changed, restored])
+        partial = Document(
+            repository_id=repository.id,
+            yuque_doc_id="partial-with-same-version",
+            title="Partial",
+            type="Doc",
+            slug="partial",
+            path="/partial",
+            original_path="/partial",
+            remote_updated_at=old_remote_time,
+        )
+        external_resource = Document(
+            repository_id=repository.id,
+            yuque_doc_id="external-resource-with-same-version",
+            title="External resource",
+            type="Doc",
+            slug="external-resource",
+            path="/external-resource",
+            original_path="/external-resource",
+            remote_updated_at=old_remote_time,
+        )
+        complete = Document(
+            repository_id=repository.id,
+            yuque_doc_id="complete-with-same-version",
+            title="Complete",
+            type="Doc",
+            slug="complete",
+            path="/complete",
+            original_path="/complete",
+            remote_updated_at=old_remote_time,
+        )
+        session.add_all([subtask, changed, restored, partial, external_resource, complete])
         session.flush()
         versions = [
             DocumentVersion(
                 document_id=document.id,
                 remote_version_id=None,
                 content_hash=str(index) * 64,
-                completeness="complete",
+                completeness="partial" if document is partial else "complete",
                 source_job_id=job.id,
             )
-            for index, document in enumerate((changed, restored), start=1)
+            for index, document in enumerate(
+                (changed, restored, partial, external_resource, complete), start=1
+            )
         ]
         session.add_all(versions)
         session.flush()
         changed.latest_successful_version_id = versions[0].id
         restored.latest_successful_version_id = versions[1].id
+        partial.latest_successful_version_id = versions[2].id
+        external_resource.latest_successful_version_id = versions[3].id
+        complete.latest_successful_version_id = versions[4].id
+        session.add_all(
+            [
+                VersionAsset(
+                    version_id=versions[2].id,
+                    original_url="https://cdn.example/image.png",
+                    normalized_url="https://cdn.example/image.png",
+                    name="image.png",
+                    type="image",
+                    position=0,
+                    source_location="body",
+                    status="downloaded",
+                ),
+                VersionAsset(
+                    version_id=versions[2].id,
+                    original_url="https://cdn.example/image.png)",
+                    normalized_url="https://cdn.example/image.png)",
+                    name="image.png)",
+                    type="image",
+                    position=1,
+                    source_location="body",
+                    status="failed",
+                    issue_code="RESOURCE_NOT_FOUND",
+                ),
+                VersionAsset(
+                    version_id=versions[3].id,
+                    original_url="https://mirror.example/ubuntu.iso",
+                    normalized_url="https://mirror.example/ubuntu.iso",
+                    name="ubuntu.iso",
+                    type="attachment",
+                    position=0,
+                    source_location="body",
+                    status="failed",
+                    issue_code="RESOURCE_NETWORK_ERROR",
+                ),
+            ]
+        )
         snapshot = QueueItemSnapshot(
             id="summary-snapshot",
             category="repository_sync",
@@ -1057,6 +1569,8 @@ async def test_summary_timestamp_and_deleted_state_reschedule_without_advancing_
         )
         changed_id = changed.id
         restored_id = restored.id
+        partial_id = partial.id
+        external_resource_id = external_resource.id
 
     service = WorkerService(sessions, settings)
     specs = service.executor._upsert_document_summaries(
@@ -1078,16 +1592,45 @@ async def test_summary_timestamp_and_deleted_state_reschedule_without_advancing_
                 "path": "/restored",
                 "updated_at": old_remote_time.isoformat(),
             },
+            {
+                "id": "partial-with-same-version",
+                "title": "Partial",
+                "slug": "partial",
+                "type": "Doc",
+                "path": "/partial",
+                "updated_at": old_remote_time.isoformat(),
+            },
+            {
+                "id": "complete-with-same-version",
+                "title": "Complete",
+                "slug": "complete",
+                "type": "Doc",
+                "path": "/complete",
+                "updated_at": old_remote_time.isoformat(),
+            },
+            {
+                "id": "external-resource-with-same-version",
+                "title": "External resource",
+                "slug": "external-resource",
+                "type": "Doc",
+                "path": "/external-resource",
+                "updated_at": old_remote_time.isoformat(),
+            },
         ],
     )
-    assert {document_id for document_id, _summary in specs} == {changed_id, restored_id}
+    assert {document_id for document_id, _summary in specs} == {
+        changed_id,
+        restored_id,
+        partial_id,
+        external_resource_id,
+    }
     with sessions() as session:
         changed = session.get(Document, changed_id)
         restored = session.get(Document, restored_id)
         assert changed is not None and changed.remote_updated_at == old_remote_time.replace(tzinfo=None)
         assert restored is not None and restored.deleted_at is not None
         subtask = session.get(BackupSubtask, snapshot.subtask_id)
-        assert subtask is not None and subtask.document_total == 2
+        assert subtask is not None and subtask.document_total == 4
     await service.aclose()
 
 

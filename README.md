@@ -1,13 +1,13 @@
 # Yuque Backup
 
-Yuque Backup 是面向单管理员、自托管场景的语雀只读备份系统。v1.0.0 提供多凭据管理、知识库发现与选择、持久化备份队列、定时增量备份、版本和资源保存、安全预览、任务审计、删除保留及本地离线浏览。
+Yuque Backup 是面向单管理员、自托管场景的语雀只读备份系统。v1.1.0 提供多凭据管理与编辑、知识库发现与选择、带额度预估的手动/定时备份向导、持久化备份队列、增量版本与附件保存、安全预览、实时任务活动、删除保留及本地离线浏览。
 
 ## 项目结构
 
 - `frontend/`：Vue 3、TypeScript、Vite/Rolldown 管理端，支持 Mock 和真实 API 模式；
 - `backend/`：FastAPI API、独立 worker、SQLite、Alembic 和本地内容存储；
 - `deploy/`：后端 Dockerfile 与 Docker Compose；
-- `需求文档.md`、`技术方案文档.md`、`API 接口文档.md`：v1.0.0 产品、技术和接口契约。
+- `需求文档.md`、`技术方案文档.md`、`API 接口文档.md`：v1.1.0 产品、技术和接口契约。
 
 ## 快速开始
 
@@ -23,12 +23,12 @@ corepack pnpm dev:real
 
 默认访问地址为 `http://127.0.0.1:3002/#/auth`，后端开发文档为 `http://127.0.0.1:8000/docs`。
 
-## v1.0.0 验证基线
+## v1.1.0 验证基线
 
-- 后端：Ruff、Mypy、99 个 Pytest 测试、Alembic head/check、wheel 和 sdist 构建通过；
-- 前端：11 个 Vitest 测试文件、46 个测试、类型检查和生产构建通过；
-- 契约：OpenAPI 46 条路径、52 个操作；
-- 运行：API live/ready、worker 心跳、真实 API 初始化/登录/退出、Cookie/CSRF、桌面和移动端渲染通过。
+- 后端：Ruff、Mypy、`uv lock --check` 和 116 个 Pytest 测试通过；
+- 前端：17 个 Vitest 测试文件、61 个测试、Vue/TypeScript 类型检查和生产构建通过；
+- 契约：OpenAPI 47 条路径、53 个操作；
+- 运行：v1.0.0 已完成 API live/ready、worker 心跳、真实 API 初始化/登录/退出、Cookie/CSRF 及桌面和移动端浏览器联调；v1.1.0 沿用相同部署拓扑。
 
 ## 范围
 

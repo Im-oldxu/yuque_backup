@@ -25,13 +25,23 @@ def test_sanitize_rewrites_only_downloaded_resource() -> None:
     assert "yb-missing-resource" not in result.html
 
 
-def test_extracts_and_deduplicates_structured_resources() -> None:
+def test_extracts_only_explicit_attachments_from_html_and_structured_fields() -> None:
     document = {
-        "body_html": '<img src="https://cdn.example/a.png#one">',
+        "body_html": (
+            '<img src="https://cdn.example/image.png">'
+            '<a href="https://www.yuque.com/attachments/manual.pdf#one">manual</a>'
+            '<a href="https://cdn.example/report.pdf">external file</a>'
+        ),
         "body_table": {
             "records": [
-                {"file": {"src": "https://cdn.example/a.png#two", "size": 12}},
-                {"file": {"src": "https://cdn.example/report.pdf", "size": 20}},
+                {"image": {"src": "https://cdn.example/image.png", "size": 12}},
+                {
+                    "file": {
+                        "attachment_url": "https://download.example/private/file.bin",
+                        "size": 20,
+                    }
+                },
+                {"file": {"download_url": "https://cdn.example/report.pdf", "size": 30}},
             ]
         },
     }
@@ -39,11 +49,68 @@ def test_extracts_and_deduplicates_structured_resources() -> None:
     resources = extract_resource_candidates(document)
 
     assert [item.normalized_url for item in resources] == [
-        "https://cdn.example/a.png",
-        "https://cdn.example/report.pdf",
+        "https://www.yuque.com/attachments/manual.pdf",
+        "https://download.example/private/file.bin",
     ]
-    assert resources[0].type == "image"
+    assert resources[0].type == "attachment"
     assert resources[1].declared_size == 20
+
+
+def test_markdown_images_are_not_backup_resources() -> None:
+    document = {
+        "body": (
+            "![one](http://101.69.138.170/202310241749382.png)\n"
+            "![two](http://101.69.138.170/202405181523106.png)"
+        )
+    }
+
+    resources = extract_resource_candidates(document)
+
+    assert resources == []
+
+
+def test_bare_attachment_url_trims_only_unmatched_closing_delimiters() -> None:
+    document = {
+        "body": (
+            "See (https://www.yuque.com/attachments/archive.zip) and "
+            "https://www.yuque.com/attachments/archive_(final).zip and "
+            "https://cdn.example/image.png"
+        )
+    }
+
+    resources = extract_resource_candidates(document)
+
+    assert [item.original_url for item in resources] == [
+        "https://www.yuque.com/attachments/archive.zip",
+        "https://www.yuque.com/attachments/archive_(final).zip",
+    ]
+
+
+def test_markdown_downloads_only_attachment_links() -> None:
+    document = {
+        "body": (
+            "![diagram](https://cdn.example/diagram.jpg)\n"
+            "[manual](https://cdn.example/manual.pdf)\n"
+            "![attachment image](https://www.yuque.com/attachments/diagram.jpg)\n"
+            "[attachment](https://www.yuque.com/attachments/manual.pdf)\n"
+            "[blog](https://www.example.com/posts/backup.html)\n"
+            "[article](https://www.example.com/articles/12345)"
+        )
+    }
+
+    resources = extract_resource_candidates(document)
+
+    assert [item.original_url for item in resources] == [
+        "https://www.yuque.com/attachments/manual.pdf"
+    ]
+
+
+def test_command_suffix_is_not_accepted_as_part_of_resource_hostname() -> None:
+    resources = extract_resource_candidates(
+        {"body": "curl https://mirrors.aliyun.com|grep almalinux"}
+    )
+
+    assert resources == []
 
 
 def test_invalid_sheet_keeps_raw_content_and_marks_partial_preview() -> None:

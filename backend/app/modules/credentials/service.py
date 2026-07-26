@@ -127,7 +127,13 @@ def serialize_credential(db: Session, credential: YuqueCredential) -> Credential
     )
 
 
-def enqueue_operation(db: Session, credential: YuqueCredential, operation_type: str) -> Operation:
+def enqueue_operation(
+    db: Session,
+    credential: YuqueCredential,
+    operation_type: str,
+    *,
+    wake_waiting: bool = False,
+) -> Operation:
     existing = db.scalar(
         select(Operation).where(
             Operation.credential_id == credential.id,
@@ -136,14 +142,36 @@ def enqueue_operation(db: Session, credential: YuqueCredential, operation_type: 
         )
     )
     if existing is not None:
+        if wake_waiting and existing.status == "waiting_quota":
+            queue_item = db.scalar(select(QueueItem).where(QueueItem.operation_id == existing.id))
+            if queue_item is not None and queue_item.status in {"pending", "retry_wait"}:
+                payload = dict(queue_item.payload)
+                payload.pop("_quota_attempt", None)
+                payload["_force_quota_probe"] = True
+                queue_item.payload = payload
+                queue_item.status = "pending"
+                queue_item.available_at = utcnow()
+                queue_item.next_retry_at = None
+                queue_item.lease_owner = None
+                queue_item.lease_until = None
+                queue_item.last_error_code = None
+                queue_item.last_error_message = None
+                existing.status = "queued"
+                existing.next_retry_at = None
+                existing.finished_at = None
+                credential.next_retry_at = None
+            return existing
         raise AppError(409, "OPERATION_ALREADY_RUNNING", "该操作已在执行")
     operation = Operation(type=operation_type, credential_id=credential.id, status="queued")
     db.add(operation)
     db.flush()
+    payload = {"credential_id": credential.id}
+    if wake_waiting and operation_type == "credential_verify" and credential.status == "waiting_quota":
+        payload["_force_quota_probe"] = True
     db.add(
         QueueItem(
             category=operation_type,
-            payload={"credential_id": credential.id},
+            payload=payload,
             priority=10 if operation_type == "credential_verify" else 20,
             status="pending",
             available_at=utcnow(),

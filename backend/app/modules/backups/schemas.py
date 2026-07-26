@@ -23,7 +23,16 @@ class RepositoryScope(APIModel):
     repository_id: uuid.UUID
 
 
-JobScope = Annotated[AllScope | CredentialScope | RepositoryScope, Field(discriminator="type")]
+class RepositoriesScope(APIModel):
+    type: Literal["repositories"]
+    credential_id: uuid.UUID
+    repository_ids: list[uuid.UUID] = Field(min_length=1, max_length=1000)
+
+
+JobScope = Annotated[
+    AllScope | CredentialScope | RepositoryScope | RepositoriesScope,
+    Field(discriminator="type"),
+]
 
 
 class CreateJobRequest(APIModel):
@@ -62,6 +71,28 @@ class JobAccepted(APIModel):
     merged: bool
 
 
+class QuotaEstimateCredential(APIModel):
+    credential_id: uuid.UUID
+    credential_name: str
+    repository_count: int
+    document_count: int
+    estimated_api_calls: int
+    rate_limit_limit: int | None
+    rate_limit_remaining: int | None
+    rate_limit_observed_at: datetime | None
+    snapshot_fresh: bool
+    sufficient: bool | None
+
+
+class QuotaEstimateResponse(APIModel):
+    repository_count: int
+    document_count: int
+    estimated_api_calls: int
+    is_precise: Literal[False] = False
+    credentials: list[QuotaEstimateCredential]
+    calculation_basis: list[str]
+
+
 class CredentialPick(APIModel):
     id: uuid.UUID
     name: str
@@ -71,6 +102,30 @@ class CredentialPick(APIModel):
 class RepositoryPick(APIModel):
     id: uuid.UUID
     name: str
+
+
+class BackupActivityResponse(APIModel):
+    stage: Literal[
+        "queued",
+        "waiting_retry",
+        "repository_metadata",
+        "repository_toc",
+        "repository_documents",
+        "repository_deletions",
+        "document_fetch",
+        "resource_download",
+        "resource_retry",
+        "document_commit",
+    ]
+    document_title: str | None = None
+    resource_name: str | None = None
+    resource_completed: int = 0
+    resource_total: int = 0
+    attempt: int | None = None
+    max_attempts: int | None = None
+    retry_in_seconds: int | None = None
+    last_error_code: str | None = None
+    updated_at: datetime | None = None
 
 
 class BackupSubtaskResponse(APIModel):
@@ -83,4 +138,5 @@ class BackupSubtaskResponse(APIModel):
     issue_count: int
     next_retry_at: datetime | None
     last_issue: str | None
+    activity: BackupActivityResponse | None
     created_at: datetime

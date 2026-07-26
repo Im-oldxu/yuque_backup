@@ -333,6 +333,7 @@ def _seed_verification(
             QueueItem(
                 category="credential_verify",
                 payload={},
+                available_at=FIXED_NOW,
                 idempotency_key=f"operation:{operation.id}",
                 operation_id=operation.id,
                 credential_id=credential_id,

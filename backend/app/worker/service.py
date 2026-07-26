@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
@@ -15,6 +17,12 @@ from app.storage import AssetDownloader, ContentStore
 from app.worker.coordinator import JobCoordinator
 from app.worker.queue import PersistentQueue
 from app.worker.sync import SyncExecutor, TokenResolver
+
+logger = logging.getLogger(__name__)
+
+
+def _is_database_locked(exc: OperationalError) -> bool:
+    return "database is locked" in str(exc).lower()
 
 
 class WorkerService:
@@ -55,8 +63,17 @@ class WorkerService:
         self._owns_yuque_client = yuque_http_client is None
         self._owns_resource_client = resource_http_client is None
         self.store = ContentStore(settings.data_root)
-        self.queue = PersistentQueue(session_factory, now=self._now)
-        self.coordinator = JobCoordinator(session_factory, self.queue, now=self._now)
+        self.queue = PersistentQueue(
+            session_factory,
+            now=self._now,
+            quota_timezone=settings.tz,
+        )
+        self.coordinator = JobCoordinator(
+            session_factory,
+            self.queue,
+            now=self._now,
+            quota_timezone=settings.tz,
+        )
         self.asset_downloader = AssetDownloader(
             self.store,
             client=self._resource_http_client,
@@ -77,6 +94,15 @@ class WorkerService:
         self._session_factory = session_factory
 
     async def run_once(self) -> bool:
+        try:
+            return await self._run_once()
+        except OperationalError as exc:
+            if not _is_database_locked(exc):
+                raise
+            logger.warning("SQLite write lock delayed the worker loop; retrying", exc_info=exc)
+            return False
+
+    async def _run_once(self) -> bool:
         current = self._now()
         if self._next_heartbeat_at is None or current >= self._next_heartbeat_at:
             self.coordinator.heartbeat(self.worker_id, started_at=self.started_at)

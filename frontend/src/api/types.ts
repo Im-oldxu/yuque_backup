@@ -150,6 +150,29 @@ export type JobScope =
   | { type: 'all' }
   | { type: 'credential'; credential_id: string }
   | { type: 'repository'; repository_id: string }
+  | { type: 'repositories'; credential_id: string; repository_ids: string[] }
+
+export interface QuotaEstimateCredential {
+  credential_id: string
+  credential_name: string
+  repository_count: number
+  document_count: number
+  estimated_api_calls: number
+  rate_limit_limit: number | null
+  rate_limit_remaining: number | null
+  rate_limit_observed_at: string | null
+  snapshot_fresh: boolean
+  sufficient: boolean | null
+}
+
+export interface QuotaEstimate {
+  repository_count: number
+  document_count: number
+  estimated_api_calls: number
+  is_precise: false
+  credentials: QuotaEstimateCredential[]
+  calculation_basis: string[]
+}
 
 export interface CredentialListParams extends PaginationParams {
   status?: CredentialStatus
@@ -243,6 +266,19 @@ export interface BackupJob {
   can_rerun: boolean
 }
 
+export interface BackupActivity {
+  stage: 'queued' | 'waiting_retry' | 'repository_metadata' | 'repository_toc' | 'repository_documents' | 'repository_deletions' | 'document_fetch' | 'resource_download' | 'resource_retry' | 'document_commit'
+  document_title: string | null
+  resource_name: string | null
+  resource_completed: number
+  resource_total: number
+  attempt: number | null
+  max_attempts: number | null
+  retry_in_seconds: number | null
+  last_error_code: string | null
+  updated_at: string | null
+}
+
 export interface BackupSubtask {
   id: string
   credential: Pick<Credential, 'id' | 'name' | 'status'>
@@ -253,6 +289,7 @@ export interface BackupSubtask {
   issue_count: number
   next_retry_at: string | null
   last_issue: string | null
+  activity: BackupActivity | null
   created_at: string
 }
 

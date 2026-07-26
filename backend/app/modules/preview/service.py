@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import re
 from dataclasses import dataclass
@@ -16,7 +17,6 @@ from app.storage.assets import safe_display_url
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\((https?://[^)\s]+)(?:\s+[^)]*)?\)", re.IGNORECASE)
-_IMAGE_EXTENSIONS = {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
 _ALLOWED_TAGS = {
     "a",
     "b",
@@ -190,8 +190,11 @@ def extract_resource_candidates(document: dict[str, Any]) -> list[ResourceCandid
     ):
         value = document.get(field)
         if isinstance(value, str):
-            for match in _MARKDOWN_LINK_RE.finditer(value):
-                found.append((match.group(1), field, None, None))
+            markdown_matches = list(_MARKDOWN_LINK_RE.finditer(value))
+            for match in markdown_matches:
+                url = match.group(1)
+                if not match.group(0).startswith("!") and is_explicit_attachment_url(url):
+                    found.append((url, field, None, None))
             if field == "body_html":
                 found.extend(_urls_from_html(value, field))
             elif field in {"body_sheet", "body_table"}:
@@ -203,8 +206,10 @@ def extract_resource_candidates(document: dict[str, Any]) -> list[ResourceCandid
                     _walk_structured_resources(parsed, field, found)
             else:
                 for match in _URL_RE.finditer(value):
-                    url = match.group(0).rstrip(".,;:!?")
-                    if _looks_like_resource(url):
+                    if any(_spans_overlap(match.span(), item.span()) for item in markdown_matches):
+                        continue
+                    url = _trim_bare_url(match.group(0))
+                    if is_explicit_attachment_url(url):
                         found.append((url, field, None, None))
         elif value is not None:
             _walk_structured_resources(value, field, found)
@@ -227,7 +232,7 @@ def extract_resource_candidates(document: dict[str, Any]) -> list[ResourceCandid
                 normalized_url=normalized,
                 safe_url=safe_display_url(original),
                 name=name,
-                type="image" if path.suffix.lower() in _IMAGE_EXTENSIONS else "attachment",
+                type="attachment",
                 mime_type=mime_type,
                 declared_size=declared_size,
                 source_location=location,
@@ -235,6 +240,22 @@ def extract_resource_candidates(document: dict[str, Any]) -> list[ResourceCandid
             )
         )
     return output
+
+
+def _spans_overlap(left: tuple[int, int], right: tuple[int, int]) -> bool:
+    return left[0] < right[1] and right[0] < left[1]
+
+
+def _trim_bare_url(value: str) -> str:
+    value = value.rstrip(".,;:!?")
+    delimiter_pairs = {")": "(", "]": "[", "}": "{"}
+    while value and value[-1] in delimiter_pairs:
+        closing = value[-1]
+        opening = delimiter_pairs[closing]
+        if value.count(closing) <= value.count(opening):
+            break
+        value = value[:-1]
+    return value
 
 
 def normalize_resource_url(value: str | None) -> str:
@@ -246,10 +267,33 @@ def normalize_resource_url(value: str | None) -> str:
     scheme = parts.scheme.lower()
     default_port = 443 if scheme == "https" else 80
     port = parts.port
-    authority = parts.hostname.lower()
+    authority = _normalize_resource_hostname(parts.hostname)
     if port is not None and port != default_port:
         authority = f"{authority}:{port}"
     return urlunsplit((scheme, authority, parts.path or "/", parts.query, ""))
+
+
+def _normalize_resource_hostname(value: str) -> str:
+    hostname = value.rstrip(".")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            hostname = hostname.encode("idna").decode("ascii").lower()
+        except UnicodeError as exc:
+            raise ValueError("resource URL hostname is invalid") from exc
+        labels = hostname.split(".")
+        if len(hostname) > 253 or any(
+            not label
+            or len(label) > 63
+            or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) is None
+            for label in labels
+        ):
+            raise ValueError("resource URL hostname is invalid") from None
+        return hostname
+    if address.version == 6:
+        return f"[{address.compressed}]"
+    return address.compressed
 
 
 def _urls_from_html(value: str, location: str) -> list[tuple[str, str, str | None, int | None]]:
@@ -260,9 +304,7 @@ def _urls_from_html(value: str, location: str) -> list[tuple[str, str, str | Non
     result: list[tuple[str, str, str | None, int | None]] = []
     for element in root.iter():
         tag = element.tag.lower() if isinstance(element.tag, str) else ""
-        if tag == "img" and element.get("src"):
-            result.append((element.get("src"), location, None, None))
-        elif tag == "a" and element.get("href") and _looks_like_resource(element.get("href")):
+        if tag == "a" and element.get("href") and is_explicit_attachment_url(element.get("href")):
             result.append((element.get("href"), location, None, None))
     return result
 
@@ -281,8 +323,14 @@ def _walk_structured_resources(
         declared_size = size if isinstance(size, int) and size >= 0 else None
         for key, item in value.items():
             child_location = f"{location}.{key}"
-            if key.lower() in {"src", "url", "download_url", "attachment_url"} and isinstance(item, str):
+            key_lower = key.lower()
+            if key_lower == "attachment_url" and isinstance(item, str):
                 if item.lower().startswith(("http://", "https://")):
+                    output.append(
+                        (item, child_location, mime if isinstance(mime, str) else None, declared_size)
+                    )
+            elif key_lower in {"url", "download_url"} and isinstance(item, str):
+                if is_explicit_attachment_url(item):
                     output.append(
                         (item, child_location, mime if isinstance(mime, str) else None, declared_size)
                     )
@@ -368,9 +416,9 @@ def _cell_text(value: Any) -> str:
     return str(value)
 
 
-def _looks_like_resource(url: str) -> bool:
+def is_explicit_attachment_url(url: str) -> bool:
     path = urlsplit(url).path.lower()
-    return "/attachments/" in path or bool(PurePosixPath(path).suffix)
+    return "/attachments/" in path
 
 
 def _semantic_html(value: str) -> str:

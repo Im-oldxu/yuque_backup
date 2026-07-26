@@ -3,6 +3,7 @@ from app.modules.preview.service import (
     ResourceCandidate,
     build_document_preview,
     extract_resource_candidates,
+    is_explicit_attachment_url,
     sanitize_html,
 )
 
@@ -11,5 +12,6 @@ __all__ = [
     "ResourceCandidate",
     "build_document_preview",
     "extract_resource_candidates",
+    "is_explicit_attachment_url",
     "sanitize_html",
 ]

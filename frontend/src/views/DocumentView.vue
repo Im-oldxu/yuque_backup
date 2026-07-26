@@ -238,6 +238,7 @@ async function load() {
     versions.value = versionResult.items
     versionPage.value = versionResult.page
     versionTotal.value = versionResult.total
+    loading.value = false
     const initial = detail.latest_successful_version
       ?? versionResult.items.find((version) => version.is_latest)
       ?? versionResult.items[0]
@@ -523,7 +524,7 @@ watch(navigationOpen, (open) => localStorage.setItem('yb_reader_navigation', ope
             <AsyncState :loading="versionLoading && !selected" :empty="!selected" empty-title="没有可浏览版本" empty-description="失败版本不会替换最后成功版本。">
               <template v-if="selected">
                 <TabsContent value="preview" class="m-0 min-h-0 flex-1 p-4 sm:p-5">
-                  <Alert v-if="selected.completeness === 'partial'" class="mb-4"><AlertTriangle /><AlertTitle>此版本不完整</AlertTitle><AlertDescription>正文可用，但存在未下载资源。预览不会静默访问远程地址。</AlertDescription></Alert>
+                  <Alert v-if="selected.completeness === 'partial'" class="mb-4"><AlertTriangle /><AlertTitle>此版本不完整</AlertTitle><AlertDescription>正文可用，但存在未下载附件。预览不会静默访问远程地址。</AlertDescription></Alert>
                   <div v-if="selected.preview_available" class="overflow-hidden rounded-md border bg-white">
                     <iframe :key="selected.id" :src="previewSrc" sandbox="" title="文档安全离线预览" class="block h-[calc(100svh-320px)] min-h-[560px] w-full bg-white" />
                   </div>
@@ -531,8 +532,8 @@ watch(navigationOpen, (open) => localStorage.setItem('yb_reader_navigation', ope
                 </TabsContent>
 
                 <TabsContent value="assets" class="m-0 min-w-0 flex-1 p-4 sm:p-5">
-                  <AsyncState :loading="assetLoading" :error="assetError" :empty="!assetTotal" empty-title="该版本没有计划内资源" empty-description="此版本没有需要单独保存的附件或图片。" @retry="loadAssetPage(assetPageNumber)">
-                    <div class="yb-table-wrap rounded-lg border"><Table><TableHeader><TableRow><TableHead>资源</TableHead><TableHead>类型</TableHead><TableHead>大小</TableHead><TableHead>状态</TableHead><TableHead class="text-right">下载</TableHead></TableRow></TableHeader><TableBody>
+                  <AsyncState :loading="assetLoading" :error="assetError" :empty="!assetTotal" empty-title="该版本没有计划内附件" empty-description="此版本没有需要单独保存的附件。" @retry="loadAssetPage(assetPageNumber)">
+                    <div class="yb-table-wrap rounded-lg border"><Table><TableHeader><TableRow><TableHead>附件</TableHead><TableHead>类型</TableHead><TableHead>大小</TableHead><TableHead>状态</TableHead><TableHead class="text-right">下载</TableHead></TableRow></TableHeader><TableBody>
                       <TableRow v-for="asset in assets" :key="asset.id"><TableCell><p class="font-medium">{{ asset.name }}</p><p v-if="asset.issue_code" class="mt-1 text-xs text-destructive">{{ asset.issue_code }}</p></TableCell><TableCell>{{ asset.mime_type ?? asset.type }}</TableCell><TableCell>{{ formatBytes(asset.size) }}</TableCell><TableCell><StatusBadge :status="asset.status" :label="asset.status === 'downloaded' ? '已保存' : asset.status === 'failed' ? '失败' : asset.status" /></TableCell><TableCell class="text-right"><Button v-if="asset.asset_id && asset.download_available" as-child variant="ghost" size="icon"><a :href="api.assetDownloadUrl(asset.asset_id)" download :aria-label="`下载 ${asset.name}`" :title="`下载 ${asset.name}`"><Download /></a></Button><span v-else class="text-xs text-muted-foreground">不可用</span></TableCell></TableRow>
                     </TableBody></Table></div>
                     <div v-if="assetTotal > 20" class="mt-3 flex items-center justify-end gap-2 text-sm"><Button variant="outline" size="icon" title="上一页资源" aria-label="上一页资源" :disabled="assetPageNumber <= 1" @click="loadAssetPage(assetPageNumber - 1)"><ChevronLeft /></Button><span class="min-w-16 text-center tabular-nums">{{ assetPageNumber }} / {{ Math.ceil(assetTotal / 20) }}</span><Button variant="outline" size="icon" title="下一页资源" aria-label="下一页资源" :disabled="assetPageNumber >= Math.ceil(assetTotal / 20)" @click="loadAssetPage(assetPageNumber + 1)"><ChevronRight /></Button></div>
@@ -540,7 +541,7 @@ watch(navigationOpen, (open) => localStorage.setItem('yb_reader_navigation', ope
                 </TabsContent>
 
                 <TabsContent value="issues" class="m-0 flex-1 p-4 sm:p-5">
-                  <AsyncState :loading="issueLoading" :error="issueError" :empty="!issueTotal" empty-title="此版本没有问题" empty-description="正文与计划内资源均已处理。" @retry="loadIssuePage(issuePageNumber)">
+                  <AsyncState :loading="issueLoading" :error="issueError" :empty="!issueTotal" empty-title="此版本没有问题" empty-description="正文与计划内附件均已处理。" @retry="loadIssuePage(issuePageNumber)">
                     <div class="flex flex-col gap-3"><Alert v-for="issue in issues" :key="issue.id" :variant="issue.level === 'error' ? 'destructive' : 'default'"><AlertTriangle /><AlertTitle>{{ issue.code }}</AlertTitle><AlertDescription><p>{{ issue.message }}</p><p class="mt-2 text-xs">尝试 {{ issue.attempt_count }} 次 · 最后发生于 {{ formatDateTime(issue.last_occurred_at) }}<span v-if="issue.safe_url"> · <a :href="issue.safe_url" target="_blank" rel="noreferrer" class="inline-flex items-center gap-1 underline">安全 URL <ExternalLink class="size-3" /></a></span></p></AlertDescription></Alert></div>
                     <div v-if="issueTotal > 20" class="mt-3 flex items-center justify-end gap-2 text-sm"><Button variant="outline" size="icon" title="上一页问题" aria-label="上一页问题" :disabled="issuePageNumber <= 1" @click="loadIssuePage(issuePageNumber - 1)"><ChevronLeft /></Button><span class="min-w-16 text-center tabular-nums">{{ issuePageNumber }} / {{ Math.ceil(issueTotal / 20) }}</span><Button variant="outline" size="icon" title="下一页问题" aria-label="下一页问题" :disabled="issuePageNumber >= Math.ceil(issueTotal / 20)" @click="loadIssuePage(issuePageNumber + 1)"><ChevronRight /></Button></div>
                   </AsyncState>

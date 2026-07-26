@@ -153,6 +153,7 @@ EXPECTED_RESPONSES: dict[OperationKey, set[int]] = {
         503,
     },
     ("POST", "/api/v1/backup-jobs"): {202, 400, 401, 403, 404, 409, 422, 500},
+    ("POST", "/api/v1/backup-jobs/estimate"): {200, 401, 403, 404, 409, 422, 500},
     ("GET", "/api/v1/backup-jobs"): {200, 401, 422, 500},
     ("GET", "/api/v1/backup-jobs/{job_id}"): {200, 401, 404, 422, 500},
     ("GET", "/api/v1/backup-jobs/{job_id}/subtasks"): {200, 401, 404, 422, 500},
@@ -191,6 +192,7 @@ CSRF_OPERATIONS = {
     ("PATCH", "/api/v1/repositories/{repository_id}/selection"),
     ("PUT", "/api/v1/repositories/{repository_id}/primary-credential"),
     ("POST", "/api/v1/backup-jobs"),
+    ("POST", "/api/v1/backup-jobs/estimate"),
     ("POST", "/api/v1/backup-jobs/{job_id}/cancel"),
     ("POST", "/api/v1/backup-jobs/{job_id}/rerun"),
     ("PUT", "/api/v1/settings/schedule"),
@@ -287,6 +289,9 @@ def test_openapi_request_and_response_field_contracts() -> None:
 
     assert components["CredentialScope"]["properties"]["credential_id"]["format"] == "uuid"
     assert components["RepositoryScope"]["properties"]["repository_id"]["format"] == "uuid"
+    repositories_scope = components["RepositoriesScope"]["properties"]
+    assert repositories_scope["credential_id"]["format"] == "uuid"
+    assert repositories_scope["repository_ids"]["items"]["format"] == "uuid"
     assert components["PrimaryCredentialRequest"]["properties"]["credential_id"]["format"] == "uuid"
     assert "id" not in components["AssetReferenceResponse"]["properties"]
 
@@ -315,10 +320,16 @@ def test_openapi_request_and_response_field_contracts() -> None:
     for model_name in ("BackupJobResponse", "DashboardJobResponse"):
         scope = components[model_name]["properties"]["scope"]
         assert scope["discriminator"]["propertyName"] == "type"
-        assert set(scope["discriminator"]["mapping"]) == {"all", "credential", "repository"}
+        assert set(scope["discriminator"]["mapping"]) == {
+            "all",
+            "credential",
+            "repositories",
+            "repository",
+        }
         assert {item["$ref"].rsplit("/", 1)[-1] for item in scope["oneOf"]} == {
             "AllScope",
             "CredentialScope",
+            "RepositoriesScope",
             "RepositoryScope",
         }
 

@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import os
 import socket
+import ssl
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -189,6 +190,12 @@ class AssetDownloader:
             except ResourceDownloadError:
                 raise
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                if _is_tls_certificate_error(exc):
+                    raise ResourceDownloadError(
+                        "RESOURCE_TLS_ERROR",
+                        "Resource HTTPS certificate verification failed",
+                        url=current,
+                    ) from exc
                 raise ResourceDownloadError(
                     "RESOURCE_NETWORK_ERROR",
                     "Resource download failed due to a temporary network error",
@@ -196,6 +203,20 @@ class AssetDownloader:
                     transient=True,
                 ) from exc
         raise AssertionError("redirect loop exited unexpectedly")
+
+
+def _is_tls_certificate_error(error: BaseException) -> bool:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        message = str(current).lower()
+        if "certificate verify failed" in message or "cert_verify_failed" in message:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 async def validate_public_http_url(

@@ -197,7 +197,7 @@ def verify_credential(
     _admin: CsrfAdmin,
 ) -> OperationResponse:
     credential = get_credential(db, str(credential_id))
-    operation = enqueue_operation(db, credential, "credential_verify")
+    operation = enqueue_operation(db, credential, "credential_verify", wake_waiting=True)
     commit_or_conflict(db)
     return serialize_operation(operation)
 

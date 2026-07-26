@@ -2,6 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import {
   Button,
+  Alert,
+  AlertDescription,
+  AlertTitle,
   Card,
   CardContent,
   CardDescription,
@@ -38,13 +41,14 @@ import {
   PaginationNext,
   PaginationPrevious,
 } from '@/components/ui/pagination'
-import { ChevronLeft, ChevronRight, Pencil, Plus, Radar, RefreshCw, Trash2 } from 'lucide-vue-next'
-import { api, ApiError, API_MODE, type Credential, type Operation } from '@/api'
+import { ChevronLeft, ChevronRight, CircleAlert, Pencil, Plus, Radar, RefreshCw, Trash2 } from 'lucide-vue-next'
+import { api, ApiError, API_MODE, type Credential, type DashboardSummary, type Operation } from '@/api'
 import AsyncState from '@/components/AsyncState.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { formatDateTime } from '@/utils/format'
+import { operationStatusText } from '@/utils/status'
 
 const PAGE_SIZE = 10
 const TERMINAL_OPERATION_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
@@ -57,6 +61,7 @@ const credentialPage = ref(1)
 const credentialTotal = ref(0)
 const operations = ref<Record<string, Operation | undefined>>({})
 const pendingActions = ref<Record<string, CredentialAction | undefined>>({})
+const worker = ref<DashboardSummary['worker'] | null>(null)
 const loading = ref(true)
 const error = ref('')
 const editorOpen = ref(false)
@@ -69,6 +74,7 @@ const deleteBusy = ref(false)
 const pollingOperationIds = new Set<string>()
 const form = reactive({ name: '', base_url: 'https://www.yuque.com', token: '' })
 let disposed = false
+let workerHealthTimer: number | undefined
 
 const pageStart = computed(() => credentialTotal.value ? (credentialPage.value - 1) * PAGE_SIZE + 1 : 0)
 const pageEnd = computed(() => Math.min(credentialPage.value * PAGE_SIZE, credentialTotal.value))
@@ -125,16 +131,140 @@ function currentOperation(credential: Credential): Operation | undefined {
   return operation && !TERMINAL_OPERATION_STATUSES.has(operation.status) ? operation : undefined
 }
 
-function displayedStatus(credential: Credential): string {
-  return currentOperation(credential)?.status ?? credential.status
-}
-
 function isCredentialBusy(credential: Credential): boolean {
   return Boolean(pendingActions.value[credential.id] || currentOperation(credential))
 }
 
 function canEnable(credential: Credential): boolean {
-  return credential.status === 'valid' || credential.status === 'disabled'
+  return credential.status === 'valid'
+}
+
+function operationTypeText(operation: Operation): string {
+  return operation.type === 'credential_verify' ? '凭据验证' : '知识库发现'
+}
+
+function operationLabel(operation: Operation): string {
+  return `${operationTypeText(operation)}：${operationStatusText[operation.status]}`
+}
+
+function isConfirmedQuotaExhausted(credential: Credential): boolean {
+  return credential.rate_limit?.remaining === 0
+}
+
+function operationHint(credential: Credential, operation: Operation): string {
+  if (operation.status === 'queued') {
+    return worker.value?.status === 'offline'
+      ? '后台任务服务离线，恢复后将自动继续。'
+      : '正在等待后台任务服务领取。'
+  }
+  if (operation.status === 'running') return '后台任务服务正在执行。'
+  if (operation.status === 'waiting_quota') {
+    const retryAt = operation.next_retry_at ?? credential.next_retry_at
+    const reason = isConfirmedQuotaExhausted(credential) ? '今日额度已用完' : '语雀 API 当前受限'
+    return retryAt
+      ? `${reason}，下次自动重试：${formatDateTime(retryAt)}。`
+      : `${reason}，系统将在次日自动重试。`
+  }
+  return ''
+}
+
+function isQuotaWaiting(credential: Credential): boolean {
+  return credential.status === 'waiting_quota'
+    || currentOperation(credential)?.status === 'waiting_quota'
+}
+
+function quotaRetryText(credential: Credential): string {
+  const retryAt = currentOperation(credential)?.next_retry_at ?? credential.next_retry_at
+  return retryAt ? `下次自动重试：${formatDateTime(retryAt)}` : '下次自动重试：次日'
+}
+
+function pendingRequest(credential: Credential): boolean {
+  return Boolean(pendingActions.value[credential.id])
+}
+
+function quotaText(credential: Credential): string {
+  if (credential.rate_limit) return `${credential.rate_limit.remaining} / ${credential.rate_limit.limit}`
+  return isQuotaWaiting(credential)
+    ? '未知'
+    : '暂无'
+}
+
+function quotaAlertTitle(credential: Credential): string {
+  return isConfirmedQuotaExhausted(credential) ? '今日语雀额度已用完' : '语雀 API 当前受限'
+}
+
+function quotaAlertDescription(credential: Credential): string {
+  return isConfirmedQuotaExhausted(credential)
+    ? '自动任务将在次日再尝试，期间不会重复请求。'
+    : '语雀返回了 429，但未提供可用的剩余额度信息。自动任务将在次日再尝试，期间不会重复请求。'
+}
+
+function quotaCheckLabel(credential: Credential): string {
+  return ['unverified', 'action_required', 'disabled'].includes(credential.status) ? '重新验证' : '检查额度'
+}
+
+function quotaCheckTitle(credential: Credential): string {
+  if (pendingRequest(credential)) return '正在提交请求，请稍候'
+  const operation = currentOperation(credential)
+  if (operation?.type === 'credential_verify' && operation.status === 'waiting_quota') return '立即检查语雀额度是否恢复'
+  if (operation) return `${operationTypeText(operation)}尚未完成，完成后才能检查额度`
+  if (worker.value?.status === 'offline') return '后台任务服务离线，恢复后才能检查额度'
+  return credential.status === 'waiting_quota' ? '立即检查语雀额度是否恢复' : '验证凭据并更新额度快照'
+}
+
+function quotaCheckDisabled(credential: Credential): boolean {
+  if (pendingRequest(credential) || worker.value?.status === 'offline') return true
+  const operation = currentOperation(credential)
+  return Boolean(operation && !(operation.type === 'credential_verify' && operation.status === 'waiting_quota'))
+}
+
+function discoverTitle(credential: Credential): string {
+  if (pendingRequest(credential)) return '正在提交请求，请稍候'
+  const operation = currentOperation(credential)
+  if (operation) return `${operationTypeText(operation)}尚未完成，完成后才能发现知识库`
+  if (worker.value?.status === 'offline') return '后台任务服务离线，恢复后才能发现知识库'
+  if (credential.status !== 'valid') return '凭据验证有效后才能发现知识库'
+  if (!credential.enabled) return '启用凭据后才能发现知识库'
+  return '发现知识库'
+}
+
+function editTitle(credential: Credential): string {
+  if (pendingRequest(credential)) return '正在提交请求，请稍候'
+  return currentOperation(credential)
+    ? '编辑凭据；修改 Token 或域名会取消当前任务'
+    : '编辑凭据'
+}
+
+function deleteTitle(credential: Credential): string {
+  if (pendingRequest(credential)) return '正在提交请求，请稍候'
+  return currentOperation(credential)
+    ? '删除凭据并取消当前任务'
+    : '删除凭据'
+}
+
+function toggleTitle(credential: Credential): string {
+  if (pendingRequest(credential)) return '正在提交请求，请稍候'
+  if (credential.enabled) {
+    return currentOperation(credential) ? '停用凭据并取消当前任务' : '停用凭据'
+  }
+  if (!canEnable(credential)) return '凭据验证有效后才能启用'
+  if (currentOperation(credential)) return '当前任务完成后才能启用'
+  return '启用凭据'
+}
+
+function toggleDisabled(credential: Credential): boolean {
+  if (pendingRequest(credential)) return true
+  if (credential.enabled) return false
+  return isCredentialBusy(credential) || !canEnable(credential)
+}
+
+async function loadWorkerHealth() {
+  try {
+    worker.value = (await api.getDashboard()).worker
+  }
+  catch {
+    worker.value = null
+  }
 }
 
 async function load(showLoading = true) {
@@ -281,11 +411,12 @@ async function submitCredential() {
 }
 
 async function verify(credential: Credential) {
+  const checkingQuota = quotaCheckLabel(credential) === '检查额度'
   setPendingAction(credential.id, 'verify')
   try {
     const operation = await api.verifyCredential(credential.id)
     setOperation(credential.id, operation)
-    toast.success('验证任务已创建。')
+    toast.success(checkingQuota ? '额度检查已提交。' : '验证任务已创建。')
     void pollOperation(credential.id, operation.id)
   }
   catch (cause) {
@@ -357,8 +488,15 @@ function changePage(page: number) {
   void load()
 }
 
-onMounted(() => load())
-onBeforeUnmount(() => { disposed = true })
+onMounted(() => {
+  void load()
+  void loadWorkerHealth()
+  workerHealthTimer = window.setInterval(() => void loadWorkerHealth(), 10_000)
+})
+onBeforeUnmount(() => {
+  disposed = true
+  if (workerHealthTimer !== undefined) window.clearInterval(workerHealthTimer)
+})
 </script>
 
 <template>
@@ -371,6 +509,15 @@ onBeforeUnmount(() => { disposed = true })
         </Button>
       </template>
     </PageHeader>
+
+    <Alert v-if="worker?.status === 'offline'" variant="destructive">
+      <CircleAlert />
+      <AlertTitle>后台任务服务离线</AlertTitle>
+      <AlertDescription>
+        凭据验证和知识库发现已暂停，已排队任务会在后台任务服务恢复后自动继续。
+        <span v-if="worker.last_heartbeat_at">最后心跳：{{ formatDateTime(worker.last_heartbeat_at) }}。</span>
+      </AlertDescription>
+    </Alert>
 
     <AsyncState
       :loading="loading"
@@ -394,7 +541,7 @@ onBeforeUnmount(() => { disposed = true })
               <TableRow>
                 <TableHead>凭据</TableHead>
                 <TableHead>主体</TableHead>
-                <TableHead>状态</TableHead>
+                <TableHead>凭据状态</TableHead>
                 <TableHead>额度</TableHead>
                 <TableHead>知识库</TableHead>
                 <TableHead>启用</TableHead>
@@ -402,7 +549,8 @@ onBeforeUnmount(() => { disposed = true })
               </TableRow>
             </TableHeader>
             <TableBody>
-              <TableRow v-for="credential in credentials" :key="credential.id">
+              <template v-for="credential in credentials" :key="credential.id">
+              <TableRow :data-credential-row="credential.id">
                 <TableCell>
                   <p class="font-medium">{{ credential.name }}</p>
                   <p class="mt-1 max-w-64 truncate text-xs text-muted-foreground">
@@ -414,8 +562,14 @@ onBeforeUnmount(() => { disposed = true })
                   <p class="mt-1 text-xs text-muted-foreground">{{ credential.subject_type }}</p>
                 </TableCell>
                 <TableCell>
-                  <StatusBadge :status="displayedStatus(credential)" />
-                  <p v-if="credential.next_retry_at" class="mt-1 text-xs text-muted-foreground">
+                  <StatusBadge :status="credential.status" />
+                  <template v-if="!isQuotaWaiting(credential) && currentOperation(credential)">
+                    <p class="mt-1 text-xs font-medium">{{ operationLabel(currentOperation(credential)!) }}</p>
+                    <p class="mt-0.5 max-w-56 text-xs text-muted-foreground">
+                      {{ operationHint(credential, currentOperation(credential)!) }}
+                    </p>
+                  </template>
+                  <p v-else-if="!isQuotaWaiting(credential) && credential.next_retry_at" class="mt-1 text-xs text-muted-foreground">
                     {{ formatDateTime(credential.next_retry_at) }} 重试
                   </p>
                   <p v-else-if="credential.last_verified_at" class="mt-1 text-xs text-muted-foreground">
@@ -423,37 +577,64 @@ onBeforeUnmount(() => { disposed = true })
                   </p>
                 </TableCell>
                 <TableCell>
-                  <template v-if="credential.rate_limit">
-                    {{ credential.rate_limit.remaining }} / {{ credential.rate_limit.limit }}
-                  </template>
-                  <span v-else class="text-muted-foreground">暂无</span>
+                  <div class="flex flex-col items-start gap-1.5">
+                    <span :class="credential.rate_limit || credential.status === 'waiting_quota' ? '' : 'text-muted-foreground'">{{ quotaText(credential) }}</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      class="h-7 px-2 text-xs"
+                      :title="quotaCheckTitle(credential)"
+                      :aria-label="`${quotaCheckLabel(credential)}：${credential.name}`"
+                      :disabled="quotaCheckDisabled(credential)"
+                      @click="verify(credential)"
+                    >
+                      <Spinner v-if="pendingActions[credential.id] === 'verify'" class="size-3" />
+                      <RefreshCw v-else data-icon="inline-start" />
+                      {{ quotaCheckLabel(credential) }}
+                    </Button>
+                  </div>
                 </TableCell>
                 <TableCell>{{ credential.repository_count }}</TableCell>
                 <TableCell>
                   <Switch
                     :model-value="credential.enabled"
-                    :disabled="pendingActions[credential.id] === 'toggle' || isCredentialBusy(credential) || (!credential.enabled && !canEnable(credential))"
+                    :disabled="toggleDisabled(credential)"
+                    :title="toggleTitle(credential)"
                     :aria-label="`${credential.name}${credential.enabled ? '停用' : '启用'}`"
                     @update:model-value="toggle(credential, $event)"
                   />
                 </TableCell>
                 <TableCell>
                   <div class="flex justify-end gap-1">
-                    <Button variant="ghost" size="icon" title="编辑凭据" aria-label="编辑凭据" :disabled="isCredentialBusy(credential)" @click="openEdit(credential)">
+                    <Button variant="ghost" size="icon" :title="editTitle(credential)" aria-label="编辑凭据" :disabled="pendingRequest(credential)" @click="openEdit(credential)">
                       <Pencil />
                     </Button>
-                    <Button variant="ghost" size="icon" title="重新验证" aria-label="重新验证" :disabled="isCredentialBusy(credential)" @click="verify(credential)">
-                      <RefreshCw />
-                    </Button>
-                    <Button variant="ghost" size="icon" title="发现知识库" aria-label="发现知识库" :disabled="isCredentialBusy(credential) || credential.status !== 'valid' || !credential.enabled" @click="discover(credential)">
+                    <Button variant="ghost" size="icon" :title="discoverTitle(credential)" aria-label="发现知识库" :disabled="isCredentialBusy(credential) || worker?.status === 'offline' || credential.status !== 'valid' || !credential.enabled" @click="discover(credential)">
                       <Radar />
                     </Button>
-                    <Button variant="ghost" size="icon" title="删除凭据" aria-label="删除凭据" :disabled="isCredentialBusy(credential)" @click="deleteTarget = credential">
+                    <Button variant="ghost" size="icon" :title="deleteTitle(credential)" aria-label="删除凭据" :disabled="pendingRequest(credential)" @click="deleteTarget = credential">
                       <Trash2 />
                     </Button>
                   </div>
                 </TableCell>
               </TableRow>
+              <TableRow
+                v-if="isQuotaWaiting(credential)"
+                :data-quota-row="credential.id"
+                class="bg-destructive/[0.03] hover:bg-destructive/[0.03]"
+              >
+                <TableCell :colspan="7" class="border-l-2 border-l-destructive px-4 py-2 whitespace-normal">
+                  <div role="status" class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm leading-5">
+                    <span class="inline-flex items-center gap-1.5 font-semibold text-destructive">
+                      <CircleAlert class="size-4 shrink-0" />
+                      {{ quotaAlertTitle(credential) }}
+                    </span>
+                    <span class="text-foreground/80">{{ quotaAlertDescription(credential) }}</span>
+                    <span class="font-medium text-foreground">{{ quotaRetryText(credential) }}</span>
+                  </div>
+                </TableCell>
+              </TableRow>
+              </template>
             </TableBody>
           </Table>
         </div>
@@ -470,7 +651,7 @@ onBeforeUnmount(() => { disposed = true })
                   <span class="mt-1 block font-mono text-xs">{{ credential.token_masked }}</span>
                 </CardDescription>
               </div>
-              <StatusBadge :status="displayedStatus(credential)" />
+              <StatusBadge :status="credential.status" />
             </div>
           </CardHeader>
           <CardContent class="flex flex-col gap-3 text-sm">
@@ -485,31 +666,61 @@ onBeforeUnmount(() => { disposed = true })
               </div>
               <div>
                 <dt class="text-xs text-muted-foreground">额度</dt>
-                <dd class="mt-1">{{ credential.rate_limit ? `${credential.rate_limit.remaining} / ${credential.rate_limit.limit}` : '暂无' }}</dd>
+                <dd class="mt-1 flex flex-col items-start gap-1.5">
+                  <span>{{ quotaText(credential) }}</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-7 px-2 text-xs"
+                    :title="quotaCheckTitle(credential)"
+                    :aria-label="`${quotaCheckLabel(credential)}：${credential.name}`"
+                    :disabled="quotaCheckDisabled(credential)"
+                    @click="verify(credential)"
+                  >
+                    <Spinner v-if="pendingActions[credential.id] === 'verify'" class="size-3" />
+                    <RefreshCw v-else data-icon="inline-start" />
+                    {{ quotaCheckLabel(credential) }}
+                  </Button>
+                </dd>
               </div>
               <div>
                 <dt class="text-xs text-muted-foreground">最后验证</dt>
                 <dd class="mt-1">{{ formatDateTime(credential.last_verified_at) }}</dd>
               </div>
             </dl>
+            <Alert
+              v-if="isQuotaWaiting(credential)"
+              class="border-destructive/40 bg-destructive/5 px-3 py-2"
+            >
+              <CircleAlert class="text-destructive" />
+              <AlertTitle class="text-sm font-semibold text-destructive">{{ quotaAlertTitle(credential) }}</AlertTitle>
+              <AlertDescription class="text-foreground/80">
+                <p class="font-medium">{{ quotaAlertDescription(credential) }}</p>
+                <p class="font-medium">{{ quotaRetryText(credential) }}</p>
+              </AlertDescription>
+            </Alert>
+            <div v-else-if="currentOperation(credential)" class="border-l-2 pl-3">
+              <p class="text-xs font-medium">{{ operationLabel(currentOperation(credential)!) }}</p>
+              <p class="mt-1 text-xs text-muted-foreground">{{ operationHint(credential, currentOperation(credential)!) }}</p>
+            </div>
             <div class="flex items-center justify-between rounded-md bg-muted/50 px-3 py-2">
               <span>参与自动备份</span>
               <Switch
                 :model-value="credential.enabled"
-                :disabled="pendingActions[credential.id] === 'toggle' || isCredentialBusy(credential) || (!credential.enabled && !canEnable(credential))"
+                :disabled="toggleDisabled(credential)"
+                :title="toggleTitle(credential)"
                 :aria-label="`${credential.name}${credential.enabled ? '停用' : '启用'}`"
                 @update:model-value="toggle(credential, $event)"
               />
             </div>
-            <p v-if="credential.next_retry_at" class="text-xs text-muted-foreground">
+            <p v-if="!isQuotaWaiting(credential) && !currentOperation(credential) && credential.next_retry_at" class="text-xs text-muted-foreground">
               下次重试：{{ formatDateTime(credential.next_retry_at) }}
             </p>
           </CardContent>
           <CardFooter class="flex flex-wrap justify-end gap-1">
-            <Button variant="ghost" size="icon" title="编辑凭据" aria-label="编辑凭据" :disabled="isCredentialBusy(credential)" @click="openEdit(credential)"><Pencil /></Button>
-            <Button variant="ghost" size="icon" title="重新验证" aria-label="重新验证" :disabled="isCredentialBusy(credential)" @click="verify(credential)"><RefreshCw /></Button>
-            <Button variant="ghost" size="icon" title="发现知识库" aria-label="发现知识库" :disabled="isCredentialBusy(credential) || credential.status !== 'valid' || !credential.enabled" @click="discover(credential)"><Radar /></Button>
-            <Button variant="ghost" size="icon" title="删除凭据" aria-label="删除凭据" :disabled="isCredentialBusy(credential)" @click="deleteTarget = credential"><Trash2 /></Button>
+            <Button variant="ghost" size="icon" :title="editTitle(credential)" aria-label="编辑凭据" :disabled="pendingRequest(credential)" @click="openEdit(credential)"><Pencil /></Button>
+            <Button variant="ghost" size="icon" :title="discoverTitle(credential)" aria-label="发现知识库" :disabled="isCredentialBusy(credential) || worker?.status === 'offline' || credential.status !== 'valid' || !credential.enabled" @click="discover(credential)"><Radar /></Button>
+            <Button variant="ghost" size="icon" :title="deleteTitle(credential)" aria-label="删除凭据" :disabled="pendingRequest(credential)" @click="deleteTarget = credential"><Trash2 /></Button>
           </CardFooter>
         </Card>
       </div>

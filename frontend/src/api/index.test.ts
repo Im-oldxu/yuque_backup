@@ -28,6 +28,21 @@ describe('business API contract', () => {
     expect(mockRequest.mock.calls[3]![1]).not.toHaveProperty('idempotencyKey')
   })
 
+  it('sends selected repositories to quota estimation without an idempotency key', async () => {
+    const scope = {
+      type: 'repositories' as const,
+      credential_id: credentialId,
+      repository_ids: [repositoryId],
+    }
+    await api.estimateJob(scope)
+
+    expect(mockRequest).toHaveBeenCalledWith('/backup-jobs/estimate', {
+      method: 'POST',
+      body: { scope },
+    })
+    expect(mockRequest.mock.calls[0]![1]).not.toHaveProperty('idempotencyKey')
+  })
+
   it('serializes every documented job filter and repeats multiple statuses', async () => {
     await api.getJobs({
       page: 2,

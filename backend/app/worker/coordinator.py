@@ -17,7 +17,8 @@ from app.core.models import (
     WorkerHeartbeat,
     YuqueCredential,
 )
-from app.worker.queue import PersistentQueue
+from app.modules.backups.service import estimate_scope_quota
+from app.worker.queue import PersistentQueue, next_quota_retry_at
 
 _TERMINAL = {"succeeded", "partial", "failed", "cancelled"}
 _NONTERMINAL = {"queued", "running", "waiting_quota"}
@@ -117,10 +118,12 @@ class JobCoordinator:
         queue: PersistentQueue,
         *,
         now: Callable[[], datetime] | None = None,
+        quota_timezone: str = "Asia/Shanghai",
     ) -> None:
         self._session_factory = session_factory
         self._queue = queue
         self._now = now or (lambda: datetime.now(UTC))
+        self._quota_timezone = quota_timezone
 
     def enqueue_cron_job(self, *, idempotency_key: str) -> str:
         current = self._now()
@@ -194,6 +197,20 @@ class JobCoordinator:
             job.active_slot = 1
             job.started_at = current
             for repository_id, credential_id in targets:
+                credential = session.get(YuqueCredential, credential_id)
+                target_estimate = (
+                    estimate_scope_quota(
+                        session,
+                        {
+                            "type": "repositories",
+                            "credential_id": credential_id,
+                            "repository_ids": [repository_id],
+                        },
+                        now=current,
+                    ).credentials[0]
+                    if credential is not None and credential.status == "valid"
+                    else None
+                )
                 subtask = session.scalar(
                     select(BackupSubtask).where(
                         BackupSubtask.job_id == job.id,
@@ -209,6 +226,33 @@ class JobCoordinator:
                     )
                     session.add(subtask)
                     session.flush()
+                available_at = current
+                if credential is not None and credential.status == "waiting_quota":
+                    available_at = next_quota_retry_at(
+                        current,
+                        timezone_name=self._quota_timezone,
+                    )
+                    if credential.next_retry_at is not None:
+                        stored_retry = credential.next_retry_at
+                        if stored_retry.tzinfo is None:
+                            stored_retry = stored_retry.replace(tzinfo=UTC)
+                        else:
+                            stored_retry = stored_retry.astimezone(UTC)
+                        available_at = max(available_at, stored_retry)
+                    subtask.status = "waiting_quota"
+                    subtask.next_retry_at = available_at
+                    subtask.last_issue = credential.pause_reason or "语雀额度不足, 等待下次探测"
+                elif target_estimate is not None and target_estimate.sufficient is False:
+                    available_at = next_quota_retry_at(
+                        current,
+                        timezone_name=self._quota_timezone,
+                    )
+                    subtask.status = "waiting_quota"
+                    subtask.next_retry_at = available_at
+                    subtask.last_issue = (
+                        f"剩余额度 {target_estimate.rate_limit_remaining}, "
+                        f"低于预计 {target_estimate.estimated_api_calls} 次请求"
+                    )
                 idempotency_key = f"job:{job.id}:repository:{repository_id}"
                 existing_item = session.scalar(
                     select(QueueItem.id).where(QueueItem.idempotency_key == idempotency_key)
@@ -220,7 +264,7 @@ class JobCoordinator:
                             idempotency_key=idempotency_key,
                             payload={"stage": "metadata", "candidate_watermark": _iso(current)},
                             priority=50,
-                            available_at=current,
+                            available_at=available_at,
                             job_id=job.id,
                             subtask_id=subtask.id,
                             credential_id=credential_id,
@@ -305,6 +349,11 @@ class JobCoordinator:
             )
         elif scope_type == "repository":
             query = query.where(Repository.id == scope.get("repository_id"))
+        elif scope_type == "repositories":
+            query = query.where(
+                RepositoryCredential.credential_id == scope.get("credential_id"),
+                Repository.id.in_(str(value) for value in scope.get("repository_ids", [])),
+            )
         elif scope_type == "all":
             query = query.where(Repository.selected.is_(True))
         else:

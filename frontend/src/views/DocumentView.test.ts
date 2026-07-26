@@ -1,6 +1,7 @@
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DocumentDetail, VersionDetail, VersionSummary } from '@/api/types'
+import AsyncState from '@/components/AsyncState.vue'
 import DocumentNavigation from '@/components/DocumentNavigation.vue'
 import PageHeader from '@/components/PageHeader.vue'
 
@@ -150,6 +151,26 @@ describe('DocumentView request ownership', () => {
 
     expect(apiMock.getVersions).toHaveBeenCalledTimes(1)
     expect(apiMock.getVersions).toHaveBeenCalledWith(documentId, { page: 1, page_size: 50 })
+  })
+
+  it('releases the page loading state before dependent reader requests finish', async () => {
+    const documentId = '11111111-1111-4111-8111-111111111111'
+    const summary = versionSummary('44444444-4444-4444-8444-444444444444')
+    const pendingVersion = deferred<VersionDetail>()
+    const pendingToc = deferred<never>()
+
+    apiMock.getDocument.mockResolvedValue(documentDetail(documentId, '快速显示的文档'))
+    apiMock.getVersions.mockResolvedValue({ items: [summary], page: 1, page_size: 50, total: 1 })
+    apiMock.getVersion.mockReturnValue(pendingVersion.promise)
+    apiMock.getToc.mockReturnValue(pendingToc.promise)
+
+    const wrapper = shallowMount(DocumentView, { props: { documentId } })
+    await flushPromises()
+
+    expect(wrapper.findComponent(PageHeader).props('title')).toBe('快速显示的文档')
+    expect(wrapper.findComponent(AsyncState).props('loading')).toBe(false)
+
+    pendingVersion.resolve(versionDetail(documentId, summary))
   })
 
   it('opens the latest successful version even when it is outside the first history page', async () => {
