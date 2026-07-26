@@ -16,7 +16,7 @@ x-application: &application
   init: true
   read_only: true
   tmpfs:
-    - /tmp:rw,nosuid,nodev,size=256m
+    - /tmp:rw,nosuid,nodev,exec,size=256m
   cap_drop:
     - ALL
   security_opt:

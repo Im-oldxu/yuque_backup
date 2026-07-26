@@ -128,6 +128,8 @@ curl --fail http://127.0.0.1:8000/health/ready
 
 `live` 只表示 API 进程存活；`ready` 还会检查数据库写入、迁移版本和内容目录。worker 容器的健康检查读取持久化心跳，超过代码规定的窗口会变为 unhealthy。日志会输出到 stdout/stderr，不在容器临时层保存业务日志。
 
+容器以非 root 用户运行，根文件系统保持只读，并移除全部 Linux capabilities、启用 `no-new-privileges`。PyInstaller 单文件程序启动时必须把共享库解包到可执行文件系统，因此 Compose 只为 `/tmp` 提供 `256 MiB` 的 `exec,nosuid,nodev` tmpfs；其中不保存业务数据，容器停止后内容即消失。不要移除 `exec`，否则进程会因无法映射解包后的共享库而退出。
+
 ## 6. 停止和重启
 
 安全停止但保留数据：
