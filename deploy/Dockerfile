@@ -16,7 +16,10 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
-RUN python -m pip install --no-cache-dir uv==0.10.0
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes binutils \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install --no-cache-dir uv==0.10.0
 
 WORKDIR /src/backend
 COPY backend/pyproject.toml backend/uv.lock ./

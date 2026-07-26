@@ -21,3 +21,6 @@
 !frontend/tsconfig.node.json
 !frontend/vite.config.ts
 !frontend/.env.production
+**/__pycache__/
+**/*.pyc
+**/*.pyo
