@@ -31,7 +31,7 @@ def create_app() -> FastAPI:
     configure_logging()
     application = FastAPI(
         title="Yuque-Backup API",
-        version="1.1.0",
+        version="1.1.1",
         lifespan=lifespan,
         docs_url=None if settings.app_env == "production" else "/docs",
         redoc_url=None,
